@@ -118,7 +118,7 @@ or
   
   where **** is "TONE", "PATCH" or "C.M."
   
-The editor supports "APR" (All parameters) and "IPR" (Individual parameter).
+The editor supports "apr" (all parameters) and "ipr" (individual parameter).
 
 It also supports bulk dumps.
 
@@ -126,15 +126,11 @@ Implementation notes:
 
 The MKS-50 sends data when a program change is made from the front panel, but unfortunately not when it receives a program change over midi.
 
-Similarly, it does not send chord data when the chord number is changed.
+Similarly, it does not send chord data when the chord number is changed from the editor.
 
-This means the editor has no way of knowing the notes actually used by the current chord.
+This means the editor has no way of knowing for certain the notes actually used by the current chord, unless a chord memory bulk dump is launched manually from the MKS-50.
 
-The editor only knows the notes in the chord that was active when the program was selected on the MKS-50 front panel.
-
-This prevents proper implementation of chord notes handling in the editor.
-
-Only a one-way, blind implementation of chord notes is possible, i.e. the editor could send chord notes according to data the user enters in the editor, but cannot retrieve them from the MKS-50, unless a bulk dump is started on the MKS-50 (not implemented yet).
+This prevents fully automated implementation of chord notes handling in the editor; the editor will usually rely on the assumption that previously loaded (or received) chord memory dump is still valid.
 
 The MKS-50 has two sets of programs (A and B), but the bulk dump data does not identify which it is.
 
