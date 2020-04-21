@@ -11,13 +11,16 @@
 #include <FL/Fl.H>
 #include <FL/fl_ask.H>
 #include <FL/Fl_Double_Window.H>
-// extern Fl_Double_Window *main_window;
 #include <FL/Fl_Button.H>
-// Fl_Double_Window* make_window();
+#include <FL/Fl_Toggle_Button.H>
 #include <FL/Fl_Output.H>
 #include <FL/Fl_Slider.H>
 #include <FL/Fl_Value_Slider.H>
 #include <FL/Fl_File_Chooser.H>
+#include <FL/Fl_Tabs.H>
+#include <FL/Fl_Table.H>
+#include <FL/fl_draw.H>
+#include <FL/Fl_Input.H>
 
 #include "Fl_List_Slider.H"
 #include "Fl_Image_List_Slider.H"
@@ -25,5 +28,7 @@
 #include <alsa/asoundlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <ctype.h>
+#include <stdarg.h>
 
 #endif
