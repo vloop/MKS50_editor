@@ -21,6 +21,8 @@
 #include <FL/Fl_Table.H>
 #include <FL/fl_draw.H>
 #include <FL/Fl_Input.H>
+#include <FL/Fl_Image_Surface.H>
+
 
 #include "Fl_List_Slider.H"
 #include "Fl_Image_List_Slider.H"
@@ -30,5 +32,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <unistd.h>
 
 #endif

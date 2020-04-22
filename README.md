@@ -120,7 +120,7 @@ or
   
 The editor supports "apr" (all parameters) and "ipr" (individual parameter).
 
-It also supports bulk dumps.
+It also supports bulk dumps (without handshake, "Bulk*Dump" on the MKS-50).
 
 Implementation notes:
 

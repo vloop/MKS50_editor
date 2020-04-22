@@ -7,12 +7,8 @@
  */
  
 /* TODO
- * test note and velocity controls
- * early alert when store is not possible (in store buttons callbacks)
  * controls for all 13 patch parameters
  * in-place patch and tone rename from parameters tab
- * send bulk dumps
- * move load button out of tabs
  */
 
 #include "MKS50_editor.h"
@@ -29,6 +25,9 @@ int portid;
 int npfd;
 struct pollfd *pfd;
 t_byte midi_channel; // 0-based
+t_byte midi_test_note=60;
+t_byte midi_test_velocity=80;
+
 bool auto_send=true; // Sends data after loading patch file or recalling patch
 
 //  MKS-50 edit buffer and memory
@@ -104,26 +103,33 @@ Fl_Group *patches_group=(Fl_Group *)0;
 Fl_Group *tones_group=(Fl_Group *)0;
 Fl_Group *chords_group=(Fl_Group *)0;
 
-Fl_Button *btn_testnote=(Fl_Button *)0;
+Fl_Toggle_Button *btn_testnote=(Fl_Toggle_Button *)0;
 Fl_Button *btn_all_notes_off=(Fl_Button *)0;
 Fl_Button *btn_save_current=(Fl_Button *)0;
 Fl_Button *btn_load_current=(Fl_Button *)0;
 Fl_Button *btn_send_current=(Fl_Button *)0;
-// Fl_Button *btn_recall_patch=(Fl_Button *)0;
 Fl_Toggle_Button *btn_rename_patch=(Fl_Toggle_Button *)0;
 Fl_Toggle_Button *btn_store_patch=(Fl_Toggle_Button *)0;
 Fl_Button *btn_save_patch_bank_a=(Fl_Button *)0;
 Fl_Button *btn_save_patch_bank_b=(Fl_Button *)0;
+Fl_Button *btn_send_patch_bank_a=(Fl_Button *)0;
+Fl_Button *btn_send_patch_bank_b=(Fl_Button *)0;
 Fl_Toggle_Button *btn_rename_tone=(Fl_Toggle_Button *)0;
 Fl_Toggle_Button *btn_store_tone=(Fl_Toggle_Button *)0;
 Fl_Button *btn_save_tone_bank_a=(Fl_Button *)0;
 Fl_Button *btn_save_tone_bank_b=(Fl_Button *)0;
+Fl_Button *btn_send_tone_bank_a=(Fl_Button *)0;
+Fl_Button *btn_send_tone_bank_b=(Fl_Button *)0;
 Fl_Button *btn_save_chords=(Fl_Button *)0;
+Fl_Button *btn_send_chords=(Fl_Button *)0;
 Fl_Output *txt_tone_name=(Fl_Output *)0;
 Fl_Output *txt_tone_num=(Fl_Output *)0;
 Fl_Output *txt_patch_name=(Fl_Output *)0;
-// Fl_Output *txt_chord=(Fl_Output *)0;
-Fl_Input *txt_chord=(Fl_Output *)0;
+Fl_Input *txt_chord=(Fl_Input *)0;
+Fl_Input *txt_midi_channel=(Fl_Input *)0;
+Fl_Input *txt_test_note=(Fl_Input *)0;
+Fl_Input *txt_test_vel=(Fl_Input *)0;
+
 Fl_Toggle_Button *btn_store_chord=(Fl_Toggle_Button *)0;
 
 void hex_dump(const t_byte* ptr, const int len){
@@ -537,7 +543,7 @@ void set_bld_from_patch_parameters(const t_byte *patch_parameters, const char *p
     b01 = (patch_parameters[12] >> 1) & 1; // key_assign_mode
     b02 = patch_parameters[12] & 1; // key_assign_mode
     b03 = patch_parameters[4] & 1; // porta_switch
-    printf("%u %u\n", b01, b02);
+    // printf("%u %u\n", b01, b02);
     *buf++= (b00 << 7) + (b01 << 6) + (b02 << 5) + (b03 << 4);
 	set_mks50_name(patch_name, buf, PATCH_NAME_SIZE); // patch_name
 	buf+=PATCH_NAME_SIZE;
@@ -644,9 +650,9 @@ int sprint_chord(char *s, const t_byte * chord){
 		}else{
 			s0+=sprintf(s0, "off ");
 		}
-		printf("%u ",chord[i]);
+		// printf("%u ",chord[i]);
 	}
-	printf("\n");
+	// printf("\n");
 	return(s0-s);
 }
 
@@ -1091,11 +1097,30 @@ static int send_sysex(t_byte * sysex, const unsigned int len){
 	ev.queue = SND_SEQ_QUEUE_DIRECT; // Possibly redundant
 	ev.flags |= SND_SEQ_EVENT_LENGTH_VARIABLE; // Mandatory !!
 	ev.type = SND_SEQ_EVENT_SYSEX;
-	ev.data.ext.len = len;
-	ev.data.ext.ptr = sysex;
-	int status = snd_seq_event_output_direct(seq_handle, &ev);
+	int status, remaining=len;
+	// Send buffer one chunk at a time, with throttling
+	// It seems the MKS-50 cannot cope when sending all at once
+	int chunk=266;
+	// chunk 256 or 266 usleep 1000000 ok
+	// chunk 266 usleep 100000 ok
+	while (remaining>chunk){
+		ev.data.ext.len = chunk;
+		ev.data.ext.ptr = sysex;	
+		// printf("sysex %02x..%02x\n", sysex[0], sysex[chunk-1]);
+		status = snd_seq_event_output_direct(seq_handle, &ev);
+		sysex+=chunk;
+		remaining -=chunk;
+		usleep(10000); // 10000 ok for MKS-50
+	}
+	if(remaining){
+		ev.data.ext.len = remaining;
+		ev.data.ext.ptr = sysex;	
+		status = snd_seq_event_output_direct(seq_handle, &ev);
+	}
 #ifdef _DEBUG		
-	printf("Output status %i\n", status);
+	printf("send_sysex: Output status %i (len %u)\n", status, len);
+	// status=len+28 ?? 202 -> 230, 4256 -> 4284
+	// we do get 202 and 4256 in kmidimon
 #endif
 	return(status);
 }
@@ -1117,12 +1142,24 @@ static void send_current_chord(){
 static void send_current(){
 	// Sends current edit buffer contents (patch, tone and chord) over MIDI
 	t_byte buf[54];
-	make_tone_apr(tone_parameters, tone_name, buf);
-	send_sysex(buf,TONE_APR_SIZE);
-	make_patch_apr(patch_parameters, patch_name, buf);
-	send_sysex(buf,PATCH_APR_SIZE);
-	make_chord_apr(chord_notes, buf);
-	send_sysex(buf,CHORD_APR_SIZE);
+	if(current_tone_valid){
+		make_tone_apr(tone_parameters, tone_name, buf);
+		send_sysex(buf,TONE_APR_SIZE);
+	}else{
+		fprintf(stderr, "No tone parameters, cannot send\n");
+	}
+	if(current_patch_valid){
+		make_patch_apr(patch_parameters, patch_name, buf);
+		send_sysex(buf,PATCH_APR_SIZE);
+	}else{
+		fprintf(stderr, "No patch parameters, cannot send\n");
+	}
+	if(current_chord_valid){
+		make_chord_apr(chord_notes, buf);
+		send_sysex(buf,CHORD_APR_SIZE);
+	}else{
+		fprintf(stderr, "No chord notes, cannot send\n");
+	}
 }
 
 int recall_chord(unsigned int chord_num){
@@ -1157,7 +1194,6 @@ int recall_tone(unsigned int tone_num){
 	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
 		
 	if(!tone_bank->valid){
-		// fl_alert("ERROR: tone data not set\n");
 		fprintf(stderr, "ERROR: tone data not set\n");
 		return(-1);
 	}
@@ -1277,12 +1313,10 @@ int store_tone(unsigned int tone_num){
     // Don't allow setting a tone when the bank has not been init'ed
     // This would create a partly valid bank
 	if(!tone_bank->valid || !current_tone_valid){
-		// fl_alert("ERROR: tone data not set");
 		fprintf(stderr,"ERROR: tone data not set\n");
 		return(-1);
 	}
 	if(tone_num<0 or tone_num>=TONES){
-		// fl_alert("ERROR: illegal tone number %u", tone_num);
 		fprintf(stderr,"ERROR: illegal tone number %u\n", tone_num);
 		return(-1);
 	}
@@ -1479,7 +1513,6 @@ int rename_tone(unsigned int tone_num){
 	int program=tone_num & 0x3F;
 	
 	if(!tone_bank->valid){
-		// fl_alert("ERROR: tone data not set\n");
 		fprintf(stderr, "ERROR: tone data not set\n");
 		return(-1);
 	}
@@ -1614,12 +1647,10 @@ int store_chord(unsigned int chord_num){
     // Don't allow setting a chord when the bank has not been init'ed
     // This would create a partly valid bank
 	if(!chord_memory_valid || !current_chord_valid){
-		// fl_alert("ERROR: chord data not set\n");
 		fprintf(stderr,"ERROR: chord data not set\n");
 		return(-1);
 	}
 	if(chord_num<0 or chord_num>=CHORDS){
-		// fl_alert("ERROR: illegal chord number %u", chord_num);
 		fprintf(stderr,"ERROR: illegal chord number %u\n", chord_num);
 		return(-1);
 	}
@@ -1702,16 +1733,6 @@ void ChordTable::draw_cell(TableContext context,
 		fl_color(FL_BLACK);
 		// sprintf(s, "%d/%d", R, C); // text for sound number cell
 		sprint_chord(s, chord_memory[R+offset()]);
-		/*
-		sprintf(s, "%u %u %u %u %u %u",
-		  chord_memory[R+offset()][0],
-		  chord_memory[R+offset()][1],
-		  chord_memory[R+offset()][2],
-		  chord_memory[R+offset()][3],
-		  chord_memory[R+offset()][4],
-		  chord_memory[R+offset()][5]
-		);
-		*/
 		fl_draw(s, X+1, Y, W-1, H, FL_ALIGN_LEFT);
 
 		// BORDER
@@ -1751,9 +1772,20 @@ void ChordTable::draw_cell(TableContext context,
 // User interface callbacks //
 //////////////////////////////
 
-bool btn_testnote_state;
+const char patch_send_prompt[]=
+	"Please start the patch bulk load on the MKS-50 before clicking on Close\n"
+	"Make sure you chose the \"*\" version (no handshake)";
+const char patch_load_prompt[]=
+	"Patch bank not set\n"
+	"Please load a patch bank sysex file or send a patch bulk dump from the MKS-50";
+const char tone_send_prompt[]=
+	"Please start the tone bulk load on the MKS-50 before clicking on Close\n"
+	"Make sure you chose the \"*\" version (no handshake)";
+const char tone_load_prompt[]=
+	"Tone bank not set\n"
+	"Please load a tone bank sysex file or send a tone bulk dump from the MKS-50";
+
 static void btn_testnote_callback(Fl_Widget* o, void*) {
-	btn_testnote_state=!btn_testnote_state;
 #ifdef _DEBUG	
 	printf("State %u\n", btn_testnote_state);
 #endif
@@ -1764,19 +1796,19 @@ static void btn_testnote_callback(Fl_Widget* o, void*) {
 	snd_seq_ev_set_direct(&ev);
 	ev.queue = SND_SEQ_QUEUE_DIRECT; // maybe redundant
 
-	if (btn_testnote_state)
+	if (((Fl_Valuator*)o)->value())
 	    ev.type=SND_SEQ_EVENT_NOTEON;
 	else
 	    ev.type=SND_SEQ_EVENT_NOTEOFF;
 	ev.data.note.channel=midi_channel;
-	ev.data.note.note=60;
-	ev.data.note.velocity=64;
+	ev.data.note.note=midi_test_note;
+	ev.data.note.velocity=midi_test_velocity;
 	
 	snd_seq_event_output_direct(seq_handle, &ev);
 }
 
 static void btn_all_notes_off_callback(Fl_Widget* o, void*) {
-	btn_testnote_state=0; // Reset test note state
+	btn_testnote->clear(); // Reset test note state
 	all_notes_off(midi_channel);
 }
 
@@ -1939,24 +1971,114 @@ static void txt_chord_callback(Fl_Widget* o, void*) {
 	if(current_chord_valid) send_current_chord();
 }
 
+static void txt_midi_channel_callback(Fl_Widget* o, void*) {
+	const char *ptr=((Fl_Input *)o)->value();
+	char *ptr2;
+	long c;
+	c=strtoul(ptr, &ptr2, 0);
+	if(c<1 or c>16)
+		show_err("Midi channel must be between 1 and 16");
+	else
+		midi_channel=c-1;
+}
+
+static void txt_test_vel_callback(Fl_Widget* o, void*) {
+	const char *ptr=((Fl_Input *)o)->value();
+	char *ptr2;
+	long v;
+	v=strtoul(ptr, &ptr2, 0);
+	if(v<1 or v>127)
+		show_err("Velocity must be between 1 and 127");
+	else
+		midi_test_velocity=v;
+}
+
+static void txt_test_note_callback(Fl_Widget* o, void*) {
+	const char *ptr=((Fl_Input *)o)->value();
+	const char *ptr2;
+	int n;
+	n=strtonote(ptr, &ptr2);
+	if(n<0 or n>127)
+		show_err("Note must be between 0 and 127"); // show as notes
+	else
+		midi_test_note=n;
+}
+
 static void btn_send_current_callback(Fl_Widget* o, void*) {
+	if(!current_patch_valid && !current_tone_valid && !current_chord_valid){
+		fl_alert("Edit buffer has no content, cannot send\n"
+			"Please load a parameters sysex file or select a patch/tone on the MKS-50");
+		return;
+	}
+	if(!current_patch_valid || !current_tone_valid || !current_chord_valid){
+		fl_alert("WARNING: Edit buffer has partial content, only the following will be sent:\n %s %s %s",
+			current_patch_valid?"Patch data\n":"",
+			current_tone_valid?"Tone data\n":"",
+			current_chord_valid?"Chord data\n":""
+			);
+	}
 	send_current();
 }
 
 static void btn_store_patch_callback(Fl_Widget* o, void*) {
-	if (btn_store_patch->value()) btn_rename_patch->clear();
+	if (btn_store_patch->value()){
+		btn_rename_patch->clear();
+		// We don't know yet what bank it will be, we can't specifically check bank validity here
+		if (!patch_bank_a.valid && !patch_bank_b.valid){
+			fl_alert(patch_load_prompt);
+			btn_store_patch->clear();
+			return;
+		}
+		if(!current_patch_valid){
+			fl_alert("Patch parameters not set in current edit buffer, cannot store\n"
+				"Please load a patch parameters sysex file or select a patch on the MKS-50");
+			btn_store_patch->clear();
+			return;
+		}
+	}
 }
 
 static void btn_rename_patch_callback(Fl_Widget* o, void*) {
-	if (btn_rename_patch->value()) btn_store_patch->clear();
+	if (btn_rename_patch->value()){
+		btn_store_patch->clear();
+		// We don't know yet what bank it will be, we can't specifically check bank validity here
+		if (!patch_bank_a.valid && !patch_bank_b.valid){
+			fl_alert(patch_load_prompt);
+			btn_rename_patch->clear();
+			return;
+		}
+	}
 }
 
 static void btn_store_tone_callback(Fl_Widget* o, void*) {
-	if (btn_store_tone->value()) btn_rename_tone->clear();
+	if (btn_store_tone->value()){
+		btn_rename_tone->clear();
+		if(!current_tone_valid){
+			// We don't know yet what bank it will be, we can't specifically check bank validity here
+			fl_alert("Tone parameters not set in current edit buffer, cannot store\n"
+				"Please load a tone parameters sysex file or select a tone on the MKS-50");
+			btn_store_tone->clear();
+			return;
+		}
+		// We don't know yet what bank it will be, we can't specifically check bank validity here
+		if (!tone_bank_a.valid && !tone_bank_b.valid){
+			fl_alert(tone_load_prompt);
+			btn_store_tone->clear();
+			return;
+		}
+	}
 }
 
 static void btn_rename_tone_callback(Fl_Widget* o, void*) {
-	if (btn_rename_tone->value()) btn_store_tone->clear();
+	if (btn_rename_tone->value()){
+		btn_store_tone->clear();
+		// We don't know yet what bank it will be, we can't specifically check bank validity here
+		if (!tone_bank_a.valid && !tone_bank_b.valid){
+			fl_alert(tone_load_prompt);
+			btn_rename_tone->clear();
+			return;
+		}
+	}
 }
 
 int load_sysex_file(const char *filename){
@@ -2102,66 +2224,129 @@ static void btn_load_current_callback(Fl_Widget* o, void*) {
     fc->show();
 }
 
+void make_patch_bld(t_byte *buf, const Patch_bank *patch_bank){
+	if(!patch_bank->valid){
+		fprintf(stderr, "ERROR: Patch bank not set\n");
+		return;
+	}
+	int program=0;
+	for(int i=0; i<16; i++){ // 16 times 4 patches
+		set_chunk_from_patches(patch_bank, buf+PATCH_BLD_SIZE*i, program);
+		program+=4;
+	}
+}
+
 void fc_save_patch_bank_a_callback(Fl_File_Chooser *w, void *userdata){
 	// This is called on any user action, not just ok depressed!
 	if(w->visible()) return; // Do nothing until user has pressed ok
-	t_byte buf[16*PATCH_BLD_SIZE];
-	int program=0;
-	for(int i=0; i<16; i++){ // 16 times 4 patches
-		set_chunk_from_patches(&patch_bank_a, buf+PATCH_BLD_SIZE*i, program);
-		program+=4;
+	if(!patch_bank_a.valid){
+		fl_alert(patch_load_prompt);
+		return;
 	}
+	t_byte buf[16*PATCH_BLD_SIZE];
+	make_patch_bld(buf, &patch_bank_a);
 	write_sysex_file(buf, 16*PATCH_BLD_SIZE, w->value(), w->filter_value() == 0);
 }
 
 void fc_save_patch_bank_b_callback(Fl_File_Chooser *w, void *userdata){
 	// This is called on any user action, not just ok depressed!
 	if(w->visible()) return; // Do nothing until user has pressed ok
+	if(!patch_bank_b.valid){
+		fl_alert(patch_load_prompt);
+		return;
+	}
 	t_byte buf[16*PATCH_BLD_SIZE];
+	make_patch_bld(buf, &patch_bank_b);
+	write_sysex_file(buf, 16*PATCH_BLD_SIZE, w->value(), w->filter_value() == 0);
+}
+
+void btn_send_patch_bank_a_callback(Fl_File_Chooser *w, void *userdata){
+	if(!patch_bank_a.valid){
+		fl_alert(patch_load_prompt);
+		return;
+	}
+	fl_alert(patch_send_prompt);
+	t_byte buf[16*PATCH_BLD_SIZE];
+	make_patch_bld(buf, &patch_bank_a);
+	send_sysex(buf, 16*PATCH_BLD_SIZE);
+}
+
+void btn_send_patch_bank_b_callback(Fl_File_Chooser *w, void *userdata){
+	if(!patch_bank_b.valid){
+		fl_alert(patch_load_prompt);
+		return;
+	}
+	fl_alert(patch_send_prompt);
+	t_byte buf[16*PATCH_BLD_SIZE];
+	make_patch_bld(buf, &patch_bank_b);
+	send_sysex(buf, 16*PATCH_BLD_SIZE);
+}
+
+void make_tone_bld(t_byte *buf, const Tone_bank *tone_bank){
+	if(!tone_bank->valid){
+		fprintf(stderr, "ERROR: Tone bank not set\n");
+		return;
+	}
 	int program=0;
-	for(int i=0; i<16; i++){ // 16 times 4 patches
-		set_chunk_from_patches(&patch_bank_b, buf+PATCH_BLD_SIZE*i, program);
+	for(int i=0; i<16; i++){ // 16 times 4 tones
+		set_chunk_from_tones(tone_bank, buf+TONE_BLD_SIZE*i, program);
 		program+=4;
 	}
-	write_sysex_file(buf, 16*PATCH_BLD_SIZE, w->value(), w->filter_value() == 0);
 }
 
 void fc_save_tone_bank_a_callback(Fl_File_Chooser *w, void *userdata){
 	// This is called on any user action, not just ok depressed!
 	if(w->visible()) return; // Do nothing until user has pressed ok
-	t_byte buf[16*TONE_BLD_SIZE];
-	int program=0;
-	for(int i=0; i<16; i++){ // 16 times 4 patches
-		set_chunk_from_tones(&tone_bank_a, buf+TONE_BLD_SIZE*i, program);
-		// hex_dump(buf+9+TONE_BLD_SIZE*i, 64); // Show 64 nibbles of 1st tone
-		program+=4;
+	if(!tone_bank_a.valid){
+		fl_alert(tone_load_prompt);
+		return;
 	}
-	// printf("3) at %p:\n", buf+9); hex_dump(buf+9, 64);
+	t_byte buf[16*TONE_BLD_SIZE];
+	make_tone_bld(buf, &tone_bank_a);
 	write_sysex_file(buf, 16*TONE_BLD_SIZE, w->value(), w->filter_value() == 0);
 }
 
 void fc_save_tone_bank_b_callback(Fl_File_Chooser *w, void *userdata){
 	// This is called on any user action, not just ok depressed!
 	if(w->visible()) return; // Do nothing until user has pressed ok
-	t_byte buf[16*TONE_BLD_SIZE];
-	int program=0;
-	for(int i=0; i<16; i++){ // 16 times 4 patches
-		set_chunk_from_tones(&tone_bank_b, buf+TONE_BLD_SIZE*i, program);
-		program+=4;
+	if(!tone_bank_b.valid){
+		fl_alert(tone_load_prompt);
+		return;
 	}
+	t_byte buf[16*TONE_BLD_SIZE];
+	make_tone_bld(buf, &tone_bank_b);
 	write_sysex_file(buf, 16*TONE_BLD_SIZE, w->value(), w->filter_value() == 0);
 }
 
-void fc_save_chords_callback(Fl_File_Chooser *w, void *userdata){
-	// This is called on any user action, not just ok depressed!
-	if(w->visible()) return; // Do nothing until user has pressed ok
-	if(!chord_memory_valid){
-		fl_alert("Chords have not been set!\n"
-		    "Please load a chords sysex file or send a chords bulk dump from the MKS-50");
+void btn_send_tone_bank_a_callback(Fl_File_Chooser *w, void *userdata){
+	if(!tone_bank_a.valid){
+		fl_alert(tone_load_prompt);
 		return;
 	}
- 	t_byte buf[CHORD_BLD_SIZE];
+	fl_alert(tone_send_prompt);
+	t_byte buf[16*TONE_BLD_SIZE];
+	make_tone_bld(buf, &tone_bank_a);
+	send_sysex(buf, 16*TONE_BLD_SIZE);
+}
+
+void btn_send_tone_bank_b_callback(Fl_File_Chooser *w, void *userdata){
+	if(!tone_bank_b.valid){
+		fl_alert(tone_load_prompt);
+		return;
+	}
+	fl_alert(tone_send_prompt);
+	t_byte buf[16*TONE_BLD_SIZE];
+	make_tone_bld(buf, &tone_bank_b);
+	send_sysex(buf, 16*TONE_BLD_SIZE);
+}
+
+void make_chord_bld(t_byte *buf){
+	// buf must be at least CHORD_BLD_SIZE bytes
 	t_byte temp_notes[CHORD_NOTES];
+	if(!chord_memory_valid){
+		fprintf(stderr, "ERROR: Chord memory not set\n");
+		return;
+	}
 	make_MKS50_sysex_header(buf, midi_channel, OP_BLD, CHORD_LEVEL);
 	buf[SYSEX_HEADER_SIZE]=0x01; // group
 	buf[SYSEX_HEADER_SIZE+1]=0x00; // extension of program number
@@ -2171,18 +2356,43 @@ void fc_save_chords_callback(Fl_File_Chooser *w, void *userdata){
 		memcpy(temp_notes, chord_memory[i], CHORD_NOTES);
 		for(int j=0; j<CHORD_NOTES; j++)
 			if (temp_notes[j]==0x7F) temp_notes[j]=0xFF;
-		hex_dump(temp_notes, CHORD_NOTES);
+		// hex_dump(temp_notes, CHORD_NOTES);
 		bytes_to_nibbles(temp_notes, buf+SYSEX_HEADER_SIZE+3+2*CHORD_NOTES*i, CHORD_NOTES);
 		// printf("%02x %02x %02x %02x %02x %02x\n", chord_memory[i][0], chord_memory[i][1], chord_memory[i][2], chord_memory[i][3], chord_memory[i][4], chord_memory[i][5]);
 	}
 	buf[CHORD_BLD_SIZE-1]=0xF7;
+}
+
+const char chord_load_prompt[]=
+	"Chords have not been set!\n"
+	"Please load a chords sysex file or send a chords bulk dump from the MKS-50";
+	
+void fc_save_chords_callback(Fl_File_Chooser *w, void *userdata){
+	// This is called on any user action, not just ok depressed!
+	if(w->visible()) return; // Do nothing until user has pressed ok
+	if(!chord_memory_valid){
+		fl_alert(chord_load_prompt);
+		return;
+	}
+ 	t_byte buf[CHORD_BLD_SIZE];
+	make_chord_bld(buf);
 	write_sysex_file(buf, CHORD_BLD_SIZE, w->value(), w->filter_value() == 0);
+}
+
+void btn_send_chords_callback(Fl_Widget* o, void*) {
+	if(!chord_memory_valid){
+		fl_alert(chord_load_prompt);
+		return;
+	}
+	fl_alert("Please start the chord bulk load on the MKS-50 before clicking on Close");
+ 	t_byte buf[CHORD_BLD_SIZE];
+	make_chord_bld(buf);
+	send_sysex(buf, CHORD_BLD_SIZE);
 }
 
 static void btn_save_patch_bank_a_callback(Fl_Widget* o, void*) {
 	if(!patch_bank_a.valid){
-		fl_alert("Patch bank A has not been set!\n"
-		    "Please load a patch bank sysex file or send a patch bulk dump from the MKS-50");
+		fl_alert(patch_load_prompt);
 		return;
 	}
     Fl_File_Chooser *fc = new Fl_File_Chooser(".","sysex files(*.syx)",Fl_File_Chooser::CREATE,"Output file");
@@ -2194,8 +2404,7 @@ static void btn_save_patch_bank_a_callback(Fl_Widget* o, void*) {
 
 static void btn_save_patch_bank_b_callback(Fl_Widget* o, void*) {
 	if(!patch_bank_b.valid){
-		fl_alert("Patch bank B has not been set!\n"
-		    "Please load a patch bank sysex file or send a patch bulk dump from the MKS-50");
+		fl_alert(patch_load_prompt);
 		return;
 	}
     Fl_File_Chooser *fc = new Fl_File_Chooser(".","sysex files(*.syx)",Fl_File_Chooser::CREATE,"Output file");
@@ -2207,8 +2416,7 @@ static void btn_save_patch_bank_b_callback(Fl_Widget* o, void*) {
 
 static void btn_save_tone_bank_a_callback(Fl_Widget* o, void*) {
 	if(!tone_bank_a.valid){
-		fl_alert("Tone bank A has not been set!\n"
-		    "Please load a tone bank sysex or send a tone bulk dump from the MKS-50");
+		fl_alert(tone_load_prompt);
 		return;
 	}
     Fl_File_Chooser *fc = new Fl_File_Chooser(".","sysex files(*.syx)",Fl_File_Chooser::CREATE,"Output file");
@@ -2220,8 +2428,7 @@ static void btn_save_tone_bank_a_callback(Fl_Widget* o, void*) {
 
 static void btn_save_tone_bank_b_callback(Fl_Widget* o, void*) {
 	if(!tone_bank_b.valid){
-		fl_alert("Tone bank B has not been set!\n"
-		    "Please load a tone bank sysex or send a tone bulk dump from the MKS-50");
+		fl_alert(tone_load_prompt);
 		return;
 	}
     Fl_File_Chooser *fc = new Fl_File_Chooser(".","sysex files(*.syx)",Fl_File_Chooser::CREATE,"Output file");
@@ -2233,8 +2440,7 @@ static void btn_save_tone_bank_b_callback(Fl_Widget* o, void*) {
 
 static void btn_save_chords_callback(Fl_Widget* o, void*) {
 	if(!chord_memory_valid){
-		fl_alert("Chords have not been set!\n"
-		    "Please load a chords sysex or send a chords bulk dump from the MKS-50");
+		fl_alert(chord_load_prompt);
 		return;
 	}
     Fl_File_Chooser *fc = new Fl_File_Chooser(".","sysex files(*.syx)",Fl_File_Chooser::CREATE,"Output file");
@@ -2297,6 +2503,7 @@ Fl_Image_List_Slider *make_image_list_slider(int x, int y, int w, int h, const c
 Fl_Double_Window* make_window() {
 
 	// Prepare images and image lists
+	// See also MKS50_images.h
 	ascii_to_rgb(env_image_data_ascii, env_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(env_dyn_image_data_ascii, env_dyn_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(env_gate_image_data_ascii, env_gate_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
@@ -2314,12 +2521,22 @@ Fl_Double_Window* make_window() {
 	ascii_to_rgb(pulse_image_data_ascii, pulse_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(pulse_mod_image_data_ascii, pulse_mod_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(square_image_data_ascii, square_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
-	ascii_to_rgb(off_image_data_ascii, off_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
+
+	// ascii_to_rgb(off_image_data_ascii, off_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
+	// see https://www.fltk.org/doc-1.3/classFl__Image__Surface.html
+	Fl_Image_Surface *img_surf = new Fl_Image_Surface(CTRL_IMAGE_WIDTH, CTRL_IMAGE_HEIGTH);
+	img_surf->set_current(); // direct graphics requests to the image
+	fl_color(FL_BACKGROUND_COLOR); fl_rectf(0, 0, CTRL_IMAGE_WIDTH, CTRL_IMAGE_HEIGTH); // draw background
+	fl_color(FL_BLACK); fl_draw("Off", -12, 5, CTRL_IMAGE_WIDTH, CTRL_IMAGE_HEIGTH, FL_ALIGN_CENTER); // Should compute text size ??
+	Fl_RGB_Image* off_image_rgb_ptr = img_surf->image();
+	// delete img_surf; // delete the img_surf object -> black image!
+	Fl_Display_Device::display_device()->set_current();  // direct graphics requests back to the display
+
 	ascii_to_rgb(narrow_square_image_data_ascii, narrow_square_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(narrow_pulse_image_data_ascii, narrow_pulse_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(double_pulse_image_data_ascii, double_pulse_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(quad_pulse_image_data_ascii, quad_pulse_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
-	pulse_images_rgb[0]=&off_image_rgb;
+	pulse_images_rgb[0]=off_image_rgb_ptr;// pulse_images_rgb[0]=&off_image_rgb;
 	pulse_images_rgb[1]=&square_image_rgb;
 	pulse_images_rgb[2]=&pulse_image_rgb;
 	pulse_images_rgb[3]=&pulse_mod_image_rgb;
@@ -2334,7 +2551,7 @@ Fl_Double_Window* make_window() {
 	ascii_to_rgb(saw3_image_data_ascii, saw3_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(saw4_image_data_ascii, saw4_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
 	ascii_to_rgb(saw5_image_data_ascii, saw5_image_data_rgb, CTRL_IMAGE_WIDTH*CTRL_IMAGE_HEIGTH);
-	saw_images_rgb[0]=&off_image_rgb;
+	saw_images_rgb[0]=off_image_rgb_ptr;
 	saw_images_rgb[1]=&saw1_image_rgb;
 	saw_images_rgb[2]=&saw2_image_rgb;
 	saw_images_rgb[3]=&saw3_image_rgb;
@@ -2361,11 +2578,10 @@ Fl_Double_Window* make_window() {
 	x += w+spacing; // There will be labels below
 	btn_save_current = new Fl_Button(x, y, 2*w+spacing, h, "Save");
 	btn_save_current->callback((Fl_Callback*)btn_save_current_callback);
+	 btn_save_current->tooltip("Save all parameters from current edit buffer to file");
 	x += 2*w + 2*spacing;
-//	btn_load_current = new Fl_Button(x, y, 2*w+spacing, h, "Load");
-//	btn_load_current->callback((Fl_Callback*)btn_load_current_callback);
-//	x += 2*w + 2*spacing;
 	btn_send_current = new Fl_Button(x, y, 2*w+spacing, h, "Send");
+	btn_send_current->tooltip("Send all parameters from current edit buffer over midi");
 	btn_send_current->callback((Fl_Callback*)btn_send_current_callback);
 	x += 2*w + 2*spacing;
 	x=x0; y+=h+spacing;
@@ -2411,7 +2627,7 @@ Fl_Double_Window* make_window() {
 	make_value_slider(x, y, w, 5*h, "Sub\nlevel", 7, 3); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "Noise\nlevel", 8, 3); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "Pulse\nwidth", 14, 127); x += w + spacing;
-	make_value_slider(x, y, w, 8*h, "Pulse\nmod\nrate", 15, 127); x += w + spacing;
+	make_value_slider(x, y, w, 8*h, "P.mod\nrate", 15, 127); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "HPF\nfreq", 9, 3); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nfreq", 16, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nreso", 17, 127); x += w + spacing;
@@ -2459,17 +2675,29 @@ Fl_Double_Window* make_window() {
 	patch_table_b->row_height_all(h);
 	patch_table_b->patches(&patch_bank_b);
 	y+=h*8+2+spacing;
-	btn_store_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-4, h, "Store");
+	btn_store_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_patch->callback((Fl_Callback*)btn_store_patch_callback);
-	x += 2*w + spacing - 4;
-	btn_rename_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-4, h, "Rename");
+	btn_store_patch->tooltip("Will store patch parameters from edit buffer to next activated patch");
+	x += 2*w + spacing - 5;
+	btn_rename_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Rename");
 	btn_rename_patch->callback((Fl_Callback*)btn_rename_patch_callback);
-	x += 2*w + spacing - 4;
-	btn_save_patch_bank_a = new Fl_Button(x, y, 2*w+spacing-4, h, "Save A");
+	btn_rename_patch->tooltip("Will rename next activated patch");
+	x += 2*w + spacing - 5;
+	btn_save_patch_bank_a = new Fl_Button(x, y, 2*w+spacing-5, h, "Save A");
 	btn_save_patch_bank_a->callback((Fl_Callback*)btn_save_patch_bank_a_callback);
-	x += 2*w + spacing - 4;
-	btn_save_patch_bank_b = new Fl_Button(x, y, 2*w+spacing-4, h, "Save B");
+	btn_save_patch_bank_a->tooltip("Save parameters for all patches from patch bank A to a file");
+	x += 2*w + spacing - 5;
+	btn_save_patch_bank_b = new Fl_Button(x, y, 2*w+spacing-5, h, "Save B");
 	btn_save_patch_bank_b->callback((Fl_Callback*)btn_save_patch_bank_b_callback);
+	btn_save_patch_bank_b->tooltip("Save parameters for all patches from patch bank B to a file");
+	x += 2*w + spacing - 5;
+	btn_send_patch_bank_a = new Fl_Button(x, y, 2*w+spacing-5, h, "Send A");
+	btn_send_patch_bank_a->callback((Fl_Callback*)btn_send_patch_bank_a_callback);
+	btn_send_patch_bank_a->tooltip("Send parameters for all patches from patch bank A over midi");
+	x += 2*w + spacing - 5;
+	btn_send_patch_bank_b = new Fl_Button(x, y, 2*w+spacing-5, h, "Send B");
+	btn_send_patch_bank_b->callback((Fl_Callback*)btn_send_patch_bank_b_callback);
+	btn_send_patch_bank_b->tooltip("Send parameters for all patches from patch bank B over midi");
 	patches_group->end();
 
 	tones_group = new Fl_Group(spacing, spacing+h, tw, th, "Tones");
@@ -2486,17 +2714,29 @@ Fl_Double_Window* make_window() {
 	tone_table_b->row_height_all(h);
 	tone_table_b->tones(&tone_bank_b);
 	y+=h*8+2+spacing;
-	btn_store_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-4, h, "Store");
+	btn_store_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_tone->callback((Fl_Callback*)btn_store_tone_callback);
-	x += 2*w + spacing - 4;
-	btn_rename_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-4, h, "Rename");
+	btn_store_tone->tooltip("Will store tone parameters from edit buffer to next activated tone");
+	x += 2*w + spacing - 5;
+	btn_rename_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Rename");
 	btn_rename_tone->callback((Fl_Callback*)btn_rename_tone_callback);
-	x += 2*w + spacing - 4;
-	btn_save_tone_bank_a = new Fl_Button(x, y, 2*w+spacing-4, h, "Save A");
+	btn_rename_tone->tooltip("Will rename next activated tone");
+	x += 2*w + spacing - 5;
+	btn_save_tone_bank_a = new Fl_Button(x, y, 2*w+spacing-5, h, "Save A");
 	btn_save_tone_bank_a->callback((Fl_Callback*)btn_save_tone_bank_a_callback);
-	x += 2*w + spacing - 4;
-	btn_save_tone_bank_b = new Fl_Button(x, y, 2*w+spacing-4, h, "Save B");
+	btn_save_tone_bank_a->tooltip("Save parameters for all tones from tone bank A to a file");
+	x += 2*w + spacing - 5;
+	btn_save_tone_bank_b = new Fl_Button(x, y, 2*w+spacing-5, h, "Save B");
 	btn_save_tone_bank_b->callback((Fl_Callback*)btn_save_tone_bank_b_callback);
+	btn_save_tone_bank_b->tooltip("Save parameters for all tones from tone bank B to a file");
+	x += 2*w + spacing - 5;
+	btn_send_tone_bank_a = new Fl_Button(x, y, 2*w+spacing-5, h, "Send A");
+	btn_send_tone_bank_a->callback((Fl_Callback*)btn_send_tone_bank_a_callback);
+	btn_send_tone_bank_a->tooltip("Send parameters for all tones from tone bank A over midi");
+	x += 2*w + spacing - 5;
+	btn_send_tone_bank_b = new Fl_Button(x, y, 2*w+spacing-5, h, "Send B");
+	btn_send_tone_bank_b->callback((Fl_Callback*)btn_send_tone_bank_b_callback);
+	btn_send_tone_bank_b->tooltip("Send parameters for all tones from tone bank B over midi");
 	tones_group->end();
 
 	chords_group = new Fl_Group(spacing, spacing+h, tw, th, "Chords");
@@ -2514,13 +2754,18 @@ Fl_Double_Window* make_window() {
 	chord_table_2->row_height_all(h);
 	chord_table_2->offset(8);
 	y+=h*8+2+spacing; x=spacing; // New row
-	btn_store_chord = new Fl_Toggle_Button(x, y, 2*w+spacing-4, h, "Store");
+	btn_store_chord = new Fl_Toggle_Button(x, y, 2*w+spacing, h, "Store");
+	btn_store_chord->tooltip("Will store chord from current edit buffer into next activated chord");
 	// btn_store_chord->callback((Fl_Callback*)btn_store_chord_callback);
-	x += 2*w + spacing - 4;
+	x += 2*w + spacing;
 	btn_save_chords = new Fl_Button(x, y, 2*w+spacing, h, "Save");
 	btn_save_chords->callback((Fl_Callback*)btn_save_chords_callback);
-	btn_save_chords->labelsize(11);
-	x += 2*w + 2*spacing;
+	btn_save_chords->tooltip("Save all chords from chord memory to a file");
+	x += 2*w + spacing;
+	btn_send_chords = new Fl_Button(x, y, 2*w+spacing, h, "Send");
+	btn_send_chords->callback((Fl_Callback*)btn_send_chords_callback);
+	btn_send_chords->tooltip("Send all chords from chord memory over midi");
+	x += 2*w + spacing;
 
 	chords_group->end();
 
@@ -2528,14 +2773,41 @@ Fl_Double_Window* make_window() {
 	
 	// The following will appear on all tabs
 	x=spacing; y=hh-h-spacing;
-	btn_testnote = new Fl_Button(x, y, 2*w+spacing, h, "Test note");
+	btn_testnote = new Fl_Toggle_Button(x, y, 2*w+spacing, h, "Test note");
 	btn_testnote->callback((Fl_Callback*)btn_testnote_callback);
+	btn_testnote->tooltip("Send a test note over midi");
 	x += 2*w + 2*spacing;
+
+	txt_midi_channel=new Fl_Input(x, y, w, h);
+	txt_midi_channel->callback((Fl_Callback*)txt_midi_channel_callback);
+	txt_midi_channel->tooltip("Set the midi channel (1..16)");
+	char str_midi_channel[5];
+	sprintf(str_midi_channel, "%u", midi_channel+1);
+	txt_midi_channel->value(str_midi_channel);
+	x += w + spacing;
+
+
+	txt_test_note=new Fl_Input(x, y, w, h);
+	txt_test_note->callback((Fl_Callback*)txt_test_note_callback);
+	txt_test_note->tooltip("Set the test note, for example C4");
+	char str_test_note[5];
+	sprint_note(str_test_note, midi_test_note);
+	txt_test_note->value(str_test_note);
+	x += w + spacing;
+	txt_test_vel=new Fl_Input(x, y, w, h);
+	txt_test_vel->callback((Fl_Callback*)txt_test_vel_callback);
+	txt_test_vel->tooltip("Set the test note velocity, between 1 and 127");
+	char str_test_vel[4];
+	snprintf(str_test_vel, 4, "%u", midi_test_velocity);
+	txt_test_vel->value(str_test_vel);
+	x += w + spacing;
 	btn_all_notes_off = new Fl_Button(x, y, 2*w+spacing, h, "Panic");
 	btn_all_notes_off->callback((Fl_Callback*)btn_all_notes_off_callback);
+	btn_all_notes_off->tooltip("Send an \"all notes off\" message");
 	x += 2*w + 2*spacing;
 	btn_load_current = new Fl_Button(x, y, 2*w+spacing, h, "Load");
 	btn_load_current->callback((Fl_Callback*)btn_load_current_callback);
+	btn_load_current->tooltip("Load any MKS-50 sysex file");
 	x += 2*w + 2*spacing;
 
 	main_window->end();
