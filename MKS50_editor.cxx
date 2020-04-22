@@ -122,9 +122,9 @@ Fl_Button *btn_send_tone_bank_a=(Fl_Button *)0;
 Fl_Button *btn_send_tone_bank_b=(Fl_Button *)0;
 Fl_Button *btn_save_chords=(Fl_Button *)0;
 Fl_Button *btn_send_chords=(Fl_Button *)0;
-Fl_Output *txt_tone_name=(Fl_Output *)0;
+Fl_Input *txt_tone_name=(Fl_Input *)0;
 Fl_Output *txt_tone_num=(Fl_Output *)0;
-Fl_Output *txt_patch_name=(Fl_Output *)0;
+Fl_Input *txt_patch_name=(Fl_Input *)0;
 Fl_Input *txt_chord=(Fl_Input *)0;
 Fl_Input *txt_midi_channel=(Fl_Input *)0;
 Fl_Input *txt_test_note=(Fl_Input *)0;
@@ -1128,38 +1128,41 @@ static int send_sysex(t_byte * sysex, const unsigned int len){
 static void send_current_tone(){
 	// Sends current tone over MIDI
 	t_byte buf[TONE_APR_SIZE];
-	make_tone_apr(tone_parameters, tone_name, buf);
-	send_sysex(buf,TONE_APR_SIZE);
-}
-
-static void send_current_chord(){
-	// Sends current chord over MIDI
-	t_byte buf[CHORD_APR_SIZE];
-	make_chord_apr(chord_notes, buf);
-	send_sysex(buf,CHORD_APR_SIZE);
-}
-
-static void send_current(){
-	// Sends current edit buffer contents (patch, tone and chord) over MIDI
-	t_byte buf[54];
 	if(current_tone_valid){
 		make_tone_apr(tone_parameters, tone_name, buf);
 		send_sysex(buf,TONE_APR_SIZE);
 	}else{
 		fprintf(stderr, "No tone parameters, cannot send\n");
 	}
-	if(current_patch_valid){
-		make_patch_apr(patch_parameters, patch_name, buf);
-		send_sysex(buf,PATCH_APR_SIZE);
-	}else{
-		fprintf(stderr, "No patch parameters, cannot send\n");
-	}
+}
+
+static void send_current_chord(){
+	// Sends current chord over MIDI
+	t_byte buf[CHORD_APR_SIZE];
 	if(current_chord_valid){
 		make_chord_apr(chord_notes, buf);
 		send_sysex(buf,CHORD_APR_SIZE);
 	}else{
 		fprintf(stderr, "No chord notes, cannot send\n");
 	}
+}
+
+static void send_current_patch(){
+	// Sends current chord over MIDI
+	t_byte buf[PATCH_APR_SIZE];
+	if(current_patch_valid){
+		make_patch_apr(patch_parameters, patch_name, buf);
+		send_sysex(buf, PATCH_APR_SIZE);
+	}else{
+		fprintf(stderr, "No patch parameters, cannot send\n");
+	}
+}
+
+static void send_current(){
+	// Sends current edit buffer contents (patch, tone and chord) over MIDI
+	send_current_patch();
+	send_current_tone();
+	send_current_chord();
 }
 
 int recall_chord(unsigned int chord_num){
@@ -1971,6 +1974,27 @@ static void txt_chord_callback(Fl_Widget* o, void*) {
 	if(current_chord_valid) send_current_chord();
 }
 
+
+static void txt_tone_name_callback(Fl_Widget* o, void*) {
+	if(!current_tone_valid){
+		fl_alert("Current tone parameters not available!\n"
+			"Please load a tone parameters file or change tone on the MKS-50");
+			return;
+	}
+	strncpy(tone_name, ((Fl_Input *)o)->value(), TONE_NAME_SIZE);
+	send_current_tone(); // No ipr available for name, send apr
+}
+
+static void txt_patch_name_callback(Fl_Widget* o, void*) {
+	if(!current_patch_valid){
+		fl_alert("Current patch parameters not available!\n"
+			"Please load a patch parameters file or change patch on the MKS-50");
+			return;
+	}
+	strncpy(patch_name, ((Fl_Input *)o)->value(), PATCH_NAME_SIZE);
+	send_current_patch(); // No ipr available for name, send apr
+}
+
 static void txt_midi_channel_callback(Fl_Widget* o, void*) {
 	const char *ptr=((Fl_Input *)o)->value();
 	char *ptr2;
@@ -2601,14 +2625,16 @@ Fl_Double_Window* make_window() {
 	make_list_slider(x, y, w, 4*h, "Key\nmode", 128 + 12, 2, key_mode_names); x += w + spacing; // Patch parameter
 	patch_controls[12]->callback((Fl_Callback*)parm_keymode_callback); // Requires special mapping
 	make_value_slider(x, y, w, 4*h, "Chord\nmemory", 128 + 11, 15); x += w + spacing; // Patch parameter
-	patch_controls[11]->callback((Fl_Callback*)parm_chord_callback); // Requires special mapping
+	patch_controls[11]->callback((Fl_Callback*)parm_chord_callback); // Requires special actions
 	x += w+spacing; // room for label
-	txt_patch_name = new Fl_Output(x, y, 2*w + spacing, h, "Patch:");
+	txt_patch_name = new Fl_Input(x, y, 2*w + spacing, h, "Patch:");
+	txt_patch_name->callback((Fl_Callback*)txt_patch_name_callback);
 	// x += 2*w + spacing;
 	y0=y; x0=x;
 	y+=h+spacing;
 	// x += w+spacing; // room for label
-	txt_tone_name = new Fl_Output(x, y, 2*w + spacing, h, "Tone:");
+	txt_tone_name = new Fl_Input(x, y, 2*w + spacing, h, "Tone:");
+	txt_tone_name->callback((Fl_Callback*)txt_tone_name_callback);
 	x += 2*w + spacing;
 	txt_tone_num = new Fl_Output(x, y, w, h);
 	y+=h+spacing; x=x0;
@@ -2777,7 +2803,6 @@ Fl_Double_Window* make_window() {
 	btn_testnote->callback((Fl_Callback*)btn_testnote_callback);
 	btn_testnote->tooltip("Send a test note over midi");
 	x += 2*w + 2*spacing;
-
 	txt_midi_channel=new Fl_Input(x, y, w, h);
 	txt_midi_channel->callback((Fl_Callback*)txt_midi_channel_callback);
 	txt_midi_channel->tooltip("Set the midi channel (1..16)");
@@ -2785,8 +2810,6 @@ Fl_Double_Window* make_window() {
 	sprintf(str_midi_channel, "%u", midi_channel+1);
 	txt_midi_channel->value(str_midi_channel);
 	x += w + spacing;
-
-
 	txt_test_note=new Fl_Input(x, y, w, h);
 	txt_test_note->callback((Fl_Callback*)txt_test_note_callback);
 	txt_test_note->tooltip("Set the test note, for example C4");
@@ -2822,15 +2845,14 @@ int main(int argc, char **argv) {
 	tone_bank_b.program_offset=64;
 	// chord_table_2->offset(8);
 
-	int errs;
+	int arg_errs=0;
 	if (argc > 1){
 		for(int i=1; i<argc;i++){
-			errs=load_sysex_file(argv[i]);
-			if (auto_send && errs==0 && current_valid) send_current();
+			arg_errs+=load_sysex_file(argv[i]);
 		}
 	}
 	
-// midi init
+	// midi init
 	pthread_t midithread;
 	seq_handle = open_seq();
 	npfd = snd_seq_poll_descriptors_count(seq_handle, POLLIN);
@@ -2844,7 +2866,11 @@ int main(int argc, char **argv) {
 		// should exit? This is non-blocking for one-way use from editor to MKS-50.
 	}
 
-// FLTK main loop
+	// Now that midi is ok, try to sync the MKS-50
+	// For this to actually work, we'd need to set channel and connect midi output from command line options
+	// if (auto_send && arg_errs==0 && current_valid) send_current();
+
+	// FLTK main loop
 	win->show();
 	return Fl::run();
 }
