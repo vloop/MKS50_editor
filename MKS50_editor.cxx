@@ -8,7 +8,6 @@
  
 /* TODO
  * controls for all 13 patch parameters
- * in-place patch and tone rename from parameters tab
  */
 
 #include "MKS50_editor.h"
@@ -152,6 +151,55 @@ static void show_err ( const char * format, ... ){
     fprintf(stderr, "%s\n", s);
     fl_alert("%s", s);
     va_end(args);
+}
+
+char note_names[][3]={
+	"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+};
+
+int sprint_note(char *s, const t_byte note){
+	return(sprintf(s, "%s%i ", note_names[note % 12], note / 12 - 1));
+}
+
+int strtonote(const char* str, const char **endptr){
+	int note_nums[]={9,11,0,2,4,5,7}; // A..G
+	const char *ptr=str;
+	char *ptr2;
+	int note;
+	long octave;
+	while(*ptr==32) ptr++; // Skip leading spaces
+	char c=toupper(*ptr);
+	if(c>='A' && c<='G'){
+		// got a proper note name
+		note=note_nums[c-'A'];
+		ptr++;
+		// check for alteration (single or double)
+		if (*ptr=='#') {ptr++; note++; if (*ptr=='#') {ptr++; note++;}}
+		else if (*ptr=='b') {ptr++; note--; if (*ptr=='b') {ptr++; note--;}}
+		// get octave
+		octave=strtol(ptr, &ptr2, 10);
+		if(ptr2>ptr){
+			note+=12*octave;
+			if(note<0 or note>127){
+				fprintf(stderr, "Note %u out of range\n", note);
+				note=-1;
+				ptr=str;
+			}else{
+				ptr=ptr2;
+			}
+		}else{
+			fprintf(stderr, "Cannot convert \"%s\" to octave number\n", ptr);
+			note=-1;
+			ptr=str;
+		}
+	}else{
+		// Illegal note
+		if (*ptr) fprintf(stderr, "Cannot convert '%c' (%u) to note\n", c, c);
+		note=-1;
+		ptr=str;
+	}
+	*endptr=ptr;
+	return(note);
 }
 
 ////////////////////////////
@@ -627,14 +675,6 @@ void set_chord_parameters_from_bld(const t_byte *buf, t_byte chord_parameters[16
 	}
 }
 
-char note_names[][3]={
-	"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-};
-
-int sprint_note(char *s, const t_byte note){
-	return(sprintf(s, "%s%i ", note_names[note % 12], note / 12 - 1));
-}
-
 int sprint_chord(char *s, const t_byte * chord){
 	// S must be able to hold at least 30 chars
 	// 0 is C4, range is -24..+24 signed 7-bit value, 127 means off
@@ -654,48 +694,6 @@ int sprint_chord(char *s, const t_byte * chord){
 	}
 	// printf("\n");
 	return(s0-s);
-}
-
-
-int note_nums[]={9,11,0,2,4,5,7}; // A..G
-int strtonote(const char* str, const char **endptr){
-	const char *ptr=str;
-	char *ptr2;
-	int note;
-	long octave;
-	while(*ptr==32) ptr++; // Skip leading spaces
-	char c=toupper(*ptr);
-	if(c>='A' && c<='G'){
-		// got a proper note name
-		note=note_nums[c-'A'];
-		ptr++;
-		// check for alteration (single or double)
-		if (*ptr=='#') {ptr++; note++; if (*ptr=='#') {ptr++; note++;}}
-		else if (*ptr=='b') {ptr++; note--; if (*ptr=='b') {ptr++; note--;}}
-		// get octave
-		octave=strtol(ptr, &ptr2, 10);
-		if(ptr2>ptr){
-			note+=12*octave;
-			if(note<0 or note>127){
-				fprintf(stderr, "Note %u out of range\n", note);
-				note=-1;
-				ptr=str;
-			}else{
-				ptr=ptr2;
-			}
-		}else{
-			fprintf(stderr, "Cannot convert \"%s\" to octave number\n", ptr);
-			note=-1;
-			ptr=str;
-		}
-	}else{
-		// Illegal note
-		if (*ptr) fprintf(stderr, "Cannot convert '%c' (%u) to note\n", c, c);
-		note=-1;
-		ptr=str;
-	}
-	*endptr=ptr;
-	return(note);
 }
 
 void redraw_tone_parameters(){
@@ -1063,8 +1061,78 @@ snd_seq_t *open_seq() {
 	fprintf(stderr, "Error creating sequencer port.\n");
 	exit(1);
   }
+//  int client = snd_seq_client_id(seq_handle);
+//  printf("client %u\n", client);
   return(seq_handle);
 }
+
+int aconnect(char *sender_name, char *dest_name)
+{
+	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
+	int queue = 0, convert_time = 0, convert_real = 0, exclusive = 0;
+
+	snd_seq_t *seq;
+	int list_perm = 0;
+	int client;
+	int list_subs = 0;
+	snd_seq_port_subscribe_t *subs;
+	snd_seq_addr_t sender, dest;
+
+	if (snd_seq_open(&seq, "default", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
+		fprintf(stderr, "can't open sequencer\n");
+		return 1;
+	}
+	
+	/* connection or disconnection */
+
+	if ((client = snd_seq_client_id(seq)) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "can't get client id\n");
+		return 1;
+	}
+
+	/* set client info */
+	if (snd_seq_set_client_name(seq, "ALSA Connector") < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "can't set client info\n");
+		return 1;
+	}
+
+	/* set subscription */
+	if (snd_seq_parse_address(seq, &sender, sender_name) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "invalid sender address %s\n", sender_name);
+		return 1;
+	}
+	if (snd_seq_parse_address(seq, &dest, dest_name) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "invalid destination address %s\n", dest_name);
+		return 1;
+	}
+	snd_seq_port_subscribe_alloca(&subs);
+	snd_seq_port_subscribe_set_sender(subs, &sender);
+	snd_seq_port_subscribe_set_dest(subs, &dest);
+	snd_seq_port_subscribe_set_queue(subs, queue);
+	snd_seq_port_subscribe_set_exclusive(subs, exclusive);
+	snd_seq_port_subscribe_set_time_update(subs, convert_time);
+	snd_seq_port_subscribe_set_time_real(subs, convert_real);
+
+	if (snd_seq_get_port_subscription(seq, subs) == 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "Connection is already subscribed\n");
+		return 1;
+	}
+	if (snd_seq_subscribe_port(seq, subs) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "Connection failed (%s)\n", snd_strerror(errno));
+		return 1;
+	}
+
+	snd_seq_close(seq);
+
+	return 0;
+}
+
 
 void all_notes_off(int channel){
 	snd_seq_event_t ev;
@@ -2237,6 +2305,12 @@ void fc_load_current_callback(Fl_File_Chooser *w, void *userdata){
 	printf("Filter: %u\n", w->filter_value());
 	if(w->visible()) return; // Do nothing until user has pressed ok
 	int errs=load_sysex_file(w->value());
+	
+	// refresh tables display just in case
+	patches_group->redraw();
+	tones_group->redraw();
+	chords_group->redraw();
+	
 	if(errs) fl_alert("Error(s) loading file %s", w->value());
 	if (auto_send && errs==0 && current_valid) send_current();
 }
@@ -2843,12 +2917,45 @@ int main(int argc, char **argv) {
 	Fl_Window* win = make_window();
 	patch_bank_b.program_offset=64;
 	tone_bank_b.program_offset=64;
+	char *sender_name=0, *dest_name=0;
+	bool dest_ok=false;
 	// chord_table_2->offset(8);
 
 	int arg_errs=0;
+	long c;
 	if (argc > 1){
 		for(int i=1; i<argc;i++){
-			arg_errs+=load_sysex_file(argv[i]);
+			if(argv[i][0]!='-' || strlen(argv[i])!=2){
+				// Got a file
+				arg_errs+=load_sysex_file(argv[i]);
+			}else{
+				// Got an option
+				if (i+1>=argc){
+					fprintf(stderr, "Option %s requires an argument\n", argv[i]);
+					exit(-1);
+				}
+				switch(argv[i][1]){
+					case 'c':
+						char *endptr;
+						c=strtoul(argv[i+1], &endptr, 0);
+						if(c<1 || c>16){
+							fprintf(stderr, "Illegal channel number %s\n", argv[i+1]);
+							exit(-1);
+						}
+						midi_channel=c-1;
+						break;
+					case 'i':
+						sender_name=argv[i+1];
+						break;
+					case 'o':
+						dest_name=argv[i+1];
+						break;
+					default:
+						fprintf(stderr, "Illegal option %s\n", argv[i]);
+						exit(-1);
+				}
+				i++;
+			}	
 		}
 	}
 	
@@ -2858,6 +2965,21 @@ int main(int argc, char **argv) {
 	npfd = snd_seq_poll_descriptors_count(seq_handle, POLLIN);
 	pfd = (struct pollfd *)alloca(npfd * sizeof(struct pollfd));
 	snd_seq_poll_descriptors(seq_handle, pfd, npfd, POLLIN);
+	
+	// midi connect
+	int client = snd_seq_client_id(seq_handle);
+	char s_client[6];
+	snprintf(s_client, 6, "%u:0", client);
+	if(dest_name){
+		if(aconnect(s_client, dest_name))
+			fprintf(stderr, "Connection to %s failed\n", dest_name);
+		else
+			dest_ok=true;
+	}
+	if(sender_name){
+		if(aconnect(sender_name, s_client))
+			fprintf(stderr, "Connection from %s failed\n", sender_name);
+	}
 
 	// create the thread and tell it to use Midi::work as thread function
 	int err = pthread_create(&midithread, NULL, alsa_midi_process, seq_handle);
@@ -2868,9 +2990,14 @@ int main(int argc, char **argv) {
 
 	// Now that midi is ok, try to sync the MKS-50
 	// For this to actually work, we'd need to set channel and connect midi output from command line options
-	// if (auto_send && arg_errs==0 && current_valid) send_current();
+	// printf("%u %u %u %u\n", dest_ok, auto_send, arg_errs, current_valid);
+	if (dest_ok && auto_send && arg_errs==0 && current_valid) send_current();
 
 	// FLTK main loop
 	win->show();
 	return Fl::run();
+	// wait for the midi thread to shutdown carefully
+	pthread_cancel(midithread);
+	// release Alsa Midi connection
+	snd_seq_close(seq_handle);
 }

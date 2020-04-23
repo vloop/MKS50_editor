@@ -32,9 +32,31 @@ sudo cp MKS50_editor /usr/local/bin/
 ```
 ## Usage
 ```
-MKS50_editor.cxx [file...]
+MKS50_editor.cxx [option arg...][file...]
 ```
-will preload any specified MKS-50 sysex files.
+will preload any specified MKS-50 sysex files (single sound or bulk dump).
+
+Available options:
+```
+-c midi channel
+-i alsa midi input id
+-o alsa midi output id
+```
+If the -o option is used and a patch file is loaded from the command line,
+the editor will automatically send that patch over midi.
+
+Please use
+```
+aconnect -i -o
+```
+to show avalable inputs and outputs ids
+
+Examples:
+```
+MKS50_editor -o 20:2 -i 20:2 PolySynth1.syx
+MKS50_editor MKS50_tones_A.syx MKS50_tones_B.syx MKS50_patches_A.syx MKS50_patches_B.syx MKS50_cm.syx
+
+```
 
 On startup, the editor has no data, and has no way of requesting data from the MKS-50 (that's a limitation of the MKS-50 sysex implementation).
 
