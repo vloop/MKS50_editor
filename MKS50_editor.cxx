@@ -8,6 +8,9 @@
  
 /* TODO
  * controls for all 13 patch parameters
+ * ask before overwriting
+ * ask before leaving unsaved changes
+ * bug after name change in parameters, unduly recall tone?
  */
 
 #include "MKS50_editor.h"
@@ -130,6 +133,31 @@ Fl_Input *txt_test_note=(Fl_Input *)0;
 Fl_Input *txt_test_vel=(Fl_Input *)0;
 
 Fl_Toggle_Button *btn_store_chord=(Fl_Toggle_Button *)0;
+
+////////////////////
+// Misc utilities //
+////////////////////
+
+// see https://stackoverflow.com/questions/122616/how-do-i-trim-leading-trailing-whitespace-in-a-standard-way
+char *trimwhitespace(char *str)
+{
+  char *end;
+
+  // Trim leading space
+  while(isspace((unsigned char)*str)) str++;
+
+  if(*str == 0)  // All spaces?
+    return str;
+
+  // Trim trailing space
+  end = str + strlen(str) - 1;
+  while(end > str && isspace((unsigned char)*end)) end--;
+
+  // Write new null terminator character
+  end[1] = '\0';
+
+  return str;
+}
 
 void hex_dump(const t_byte* ptr, const int len){
 		// Hex dump of sysex contents
@@ -1199,6 +1227,7 @@ static void send_current_tone(){
 	if(current_tone_valid){
 		make_tone_apr(tone_parameters, tone_name, buf);
 		send_sysex(buf,TONE_APR_SIZE);
+		printf("Sent current tone\n");
 	}else{
 		fprintf(stderr, "No tone parameters, cannot send\n");
 	}
@@ -1210,6 +1239,7 @@ static void send_current_chord(){
 	if(current_chord_valid){
 		make_chord_apr(chord_notes, buf);
 		send_sysex(buf,CHORD_APR_SIZE);
+		printf("Sent current chord\n");
 	}else{
 		fprintf(stderr, "No chord notes, cannot send\n");
 	}
@@ -1221,6 +1251,7 @@ static void send_current_patch(){
 	if(current_patch_valid){
 		make_patch_apr(patch_parameters, patch_name, buf);
 		send_sysex(buf, PATCH_APR_SIZE);
+		printf("Sent current patch\n");
 	}else{
 		fprintf(stderr, "No patch parameters, cannot send\n");
 	}
@@ -1885,19 +1916,28 @@ static void btn_all_notes_off_callback(Fl_Widget* o, void*) {
 
 
 void write_sysex_file(const t_byte *buf, const int len, const char *filename, bool auto_ext ){
-	char * filename2;
+	char * filename2, *filename3;
 	FILE *sysex_file;
 	filename2=(char *)malloc(strlen(filename)+5);
-	if (filename){
-		strcpy(filename2, filename);	
-		if (auto_ext && strchr(filename,'.') == 0)
-			strcat(filename2, ".syx");
-		// Should check existence and prompt before overwriting ??
-		sysex_file=fopen(filename2,"wb");
+	if (filename2){
+		strcpy(filename2, filename);
+		filename3=trimwhitespace(filename2);
+		if (auto_ext && strchr(filename3,'.') == 0)
+			strcat(filename3, ".syx");
+		// Check existence and prompt before overwriting
+		if( access( filename3, F_OK ) != -1 ) {
+			if(fl_choice("File already exists. Overwrite?","Yes", "No", 0)){
+				free(filename2);
+				fprintf(stderr, "Write sysex file cancelled.\n");
+				return;
+			}
+			printf("Overwriting %s\n", filename3);
+		}
+		sysex_file=fopen(filename3,"wb");
 		if (sysex_file==0){
-			fprintf(stderr,"ERROR: Can not open sysex file %s\n", filename2);
+			fprintf(stderr,"ERROR: Can not open sysex file %s\n", filename3);
 		}else{		
-			printf("Writing %u bytes to %s\n", len, filename2);
+			printf("Writing %u bytes to %s\n", len, filename3);
 			fwrite(buf, 1, len, sysex_file);
 			fclose(sysex_file);
 			// printf("4) at %p:\n", buf+9); hex_dump(buf+9, 64);
@@ -1910,6 +1950,7 @@ void write_sysex_file(const t_byte *buf, const int len, const char *filename, bo
 
 void fc_save_current_callback(Fl_File_Chooser *w, void *userdata){
 	// ?? should remember directory across calls
+	if(w->visible()) return; // Do nothing until user has pressed ok
 #ifdef _DEBUG	
 	printf("File: %s\n", w->value());
 	printf("Directory: %s\n", w->directory());
@@ -1954,55 +1995,74 @@ static void btn_save_current_callback(Fl_Widget* o, void*) {
     fc->callback(fc_save_current_callback);
     fc->show();
 }
+static void set_parm(t_byte parm_num, t_byte parm_val){
+	// Set in memory and sends to MKS-50
+	// Parameter number coded on 7 bits
+	// Parameter type on bit 7, 0 for tone, 1 for patch
+	t_byte sysex[]="\xF0\x41\x36\x00\x23\x20\x01\x00\x00\xF7";
+	bool is_patch_parm=parm_num>0x7F;
+	t_byte short_parm_num=parm_num & 0x7F;
+	if(is_patch_parm){
+		if (short_parm_num>PATCH_PARMS){
+			fprintf(stderr, "ERROR: Illegal patch parameter number %u\n", short_parm_num);
+			return;
+		}
+		patch_parameters[short_parm_num]=parm_val;
+		printf("set patch parameter #%u to %u\n", short_parm_num, parm_val);
+	}else{ // Tone parm
+		if (short_parm_num>TONE_PARMS){
+			fprintf(stderr, "ERROR: Illegal tone parameter number %u\n", short_parm_num);
+			return;
+		}
+		tone_parameters[short_parm_num]=parm_val;
+		printf("set tone parameter #%u to %u\n", short_parm_num, parm_val);
+	}
+	
+	sysex[3]=midi_channel;
+	sysex[5]=is_patch_parm ? 0x30: 0x20;
+	sysex[7]=short_parm_num;
+	sysex[8]=parm_val;
+	send_sysex(sysex, 10);
+	// check_error(status, "snd_seq_event_output_direct");
+}
 
 static void parm_callback(Fl_Widget* o, void*) {
-	t_byte sysex[]="\xF0\x41\x36\x00\x23\x20\x01\x00\x00\xF7";
 	if (o){
 #ifdef _DEBUG
 		printf("%s parameter #%u = %u\n", (unsigned int)o->argument() & 0x80 ? "Patch": "Tone", (unsigned int)o->argument() & 0x3F, (unsigned int)((Fl_Valuator*)o)->value());
 #endif
-		sysex[3]=midi_channel;
-		// Parameter number coded on 7 bits
-		// Parameter type on bit 7, 0 for tone, 1 for patch
-		sysex[5]=(t_byte)o->argument() & 0x80 ? 0x30: 0x20;
-		sysex[7]=(t_byte)o->argument() & 0x3F;
-		sysex[8]=(t_byte)((Fl_Valuator*)o)->value();
-		send_sysex(sysex, 10);
-		// check_error(status, "snd_seq_event_output_direct");
+		set_parm((t_byte)o->argument(), (t_byte)((Fl_Valuator*)o)->value());
 	}
 }
 
 static void parm_keymode_callback(Fl_Widget* o, void*) {
-	t_byte sysex[]="\xF0\x41\x36\x00\x23\x20\x01\x00\x00\xF7";
 	if (o){
+#ifdef _DEBUG
 		printf("%s keymode parameter #%u = %u\n", (unsigned int)o->argument() & 0x80 ? "Patch": "Tone", (unsigned int)o->argument() & 0x3F, (unsigned int)((Fl_Valuator*)o)->value());
-		sysex[3]=midi_channel;
-		// Parameter number coded on 7 bits
-		// Parameter type on bit 7, 0 for tone, 1 for patch
-		sysex[5]=(t_byte)o->argument() & 0x80 ? 0x30: 0x20;
-		sysex[7]=(t_byte)o->argument() & 0x3F;
-		sysex[8]=key_mode_map[(t_byte)((Fl_Valuator*)o)->value()];
-		send_sysex(sysex, 10);
-		// check_error(status, "snd_seq_event_output_direct");
+#endif
+		t_byte parm_val=(t_byte)((Fl_Valuator*)o)->value();
+		if (parm_val>2){
+			fprintf(stderr, "ERROR: illegal key mode %u\n", parm_val);
+			return;
+		}
+		set_parm((t_byte)o->argument(), key_mode_map[parm_val]); // Send the correct sysex
+		patch_parameters[12]=parm_val; // Fix the current value
+#ifdef _DEBUG	
+		printf("Key mode %u -> sysex 0x%02x\n", parm_val, key_mode_map[parm_val]);
+#endif
 	}
 }
 
 static void parm_chord_callback(Fl_Widget* o, void*) {
-	t_byte sysex[]="\xF0\x41\x36\x00\x23\x20\x01\x00\x00\xF7";
-	t_byte chord = (t_byte)((Fl_Valuator*)o)->value();
 	if (o){
-		printf("%s keymode parameter #%u = %u\n", (unsigned int)o->argument() & 0x80 ? "Patch": "Tone", (unsigned int)o->argument() & 0x3F, (unsigned int)((Fl_Valuator*)o)->value());
-		sysex[3]=midi_channel;
-		// Parameter number coded on 7 bits
-		// Parameter type on bit 7, 0 for tone, 1 for patch
-		sysex[5]=(t_byte)o->argument() & 0x80 ? 0x30: 0x20;
-		sysex[7]=(t_byte)o->argument() & 0x3F;
-		sysex[8]=chord;
-		send_sysex(sysex, 10);
-		// check_error(status, "snd_seq_event_output_direct");
+		t_byte chord = (t_byte)((Fl_Valuator*)o)->value();
+		if(chord>=16){
+			fprintf(stderr, "ERROR: illegal chord number %u\n", chord);
+			return;
+		}		
+		set_parm((t_byte)o->argument(), chord);
+		recall_chord(chord);
 	}
-	patch_parameters[11]=chord;
-	recall_chord(chord);
 }
 
 static void txt_chord_callback(Fl_Widget* o, void*) {
@@ -2060,7 +2120,10 @@ static void txt_patch_name_callback(Fl_Widget* o, void*) {
 			return;
 	}
 	strncpy(patch_name, ((Fl_Input *)o)->value(), PATCH_NAME_SIZE);
-	send_current_patch(); // No ipr available for name, send apr
+	// send_current_patch(); // No ipr available for name, send apr
+	// However this sets the tone and chord numbers ??
+	// hence need to resend tone and chord as well
+	send_current();
 }
 
 static void txt_midi_channel_callback(Fl_Widget* o, void*) {
@@ -2310,6 +2373,7 @@ void fc_load_current_callback(Fl_File_Chooser *w, void *userdata){
 	patches_group->redraw();
 	tones_group->redraw();
 	chords_group->redraw();
+	controls_group->redraw();
 	
 	if(errs) fl_alert("Error(s) loading file %s", w->value());
 	if (auto_send && errs==0 && current_valid) send_current();
