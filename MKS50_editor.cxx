@@ -386,8 +386,10 @@ void set_apr_from_chord_notes(const t_byte *chord_notes, t_byte* buf){
 	buf+=make_MKS50_sysex_header(buf, midi_channel, OP_APR, CHORD_LEVEL);
 	*buf++=0x01; // Group
 	for (int i=0; i < CHORD_NOTES; i++)
-		*buf++=chord_notes[i]; // 60+chord_notes[i]-(chord_notes[i]>0x3f?128:0);
+		*buf++=chord_notes[i];
+#ifdef _DEBUG
 	printf("Chord: %u %u %u %u %u %u\n", chord_notes[0], chord_notes[1], chord_notes[2], chord_notes[3], chord_notes[4], chord_notes[5]);
+#endif
 	*buf++=0xF7;
 }
 
@@ -765,7 +767,7 @@ void redraw_tone_parameters(){
 //	Fl::unlock();
 }
 
-void get_apr_tone_parameters(const t_byte *buf, t_byte *tone_parameters, char *tone_name){
+void set_tone_parameters_from_apr(const t_byte *buf, t_byte *tone_parameters, char *tone_name){
 	// Translate apr to tone data and display (should separate??)
 	// buf points to sysex APR data, past 7 bytes sysex header
 	for (int i=0; i < TONE_PARMS; i++){
@@ -812,7 +814,7 @@ void redraw_patch_parameters(){
 //	Fl::unlock();
 }
 
-void get_apr_patch_parameters(const t_byte *buf, t_byte *patch_parameters, char *patch_name){
+void set_patch_parameters_from_apr(const t_byte *buf, t_byte *patch_parameters, char *patch_name){
 	// Translate apr to patch data and display
 	// buf points to sysex APR data, past 7 bytes sysex header
 	char *k;
@@ -861,13 +863,12 @@ void redraw_chord_notes(){
 //	Fl::unlock();
 }
 
-void get_apr_chord_notes(const t_byte *buf, t_byte *chord_notes){
+void set_chord_notes_from_apr(const t_byte *buf, t_byte *chord_notes){
 	// Translate apr to chord data and display
 	// buf points to sysex APR data, past 7 bytes sysex header
-	hex_dump(buf, CHORD_NOTES);
+	// hex_dump(buf, CHORD_NOTES);
 	for (int i=0; i < CHORD_NOTES; i++){
 		chord_notes[i]=buf[i];
-		// chord_notes[i]=buf[i]==127?127:buf[i]-60+(buf[i]>=60?0:128);
 	}
 	printf("Got all chord notes\n");
 	redraw_chord_notes();
@@ -1789,7 +1790,7 @@ static void *alsa_midi_process(void *handle) {
 								switch(level){
 									case TONE_LEVEL:
 										if(len==TONE_APR_SIZE){
-											get_apr_tone_parameters(ptr+7, tone_parameters, tone_name);
+											set_tone_parameters_from_apr(ptr+7, tone_parameters, tone_name);
 											current_tone_valid=true;
 											// redraw_tone_parameters();
 										}else{
@@ -1799,7 +1800,7 @@ static void *alsa_midi_process(void *handle) {
 										break;
 									case PATCH_LEVEL:
 										if(len==PATCH_APR_SIZE){
-											get_apr_patch_parameters(ptr+7, patch_parameters, patch_name);
+											set_patch_parameters_from_apr(ptr+7, patch_parameters, patch_name);
 											current_patch_valid=true;
 											// redraw_patch_parameters();
 										}else{
@@ -1814,7 +1815,7 @@ static void *alsa_midi_process(void *handle) {
 												chord_notes[i]=ptr[i+7];
 											printf("Got current chord\n");
 											*/
-											get_apr_chord_notes(ptr+7, chord_notes);
+											set_chord_notes_from_apr(ptr+7, chord_notes);
 											current_chord_valid=true;
 											chord_from_apr=true;
 											redraw_chord_notes();
@@ -2303,7 +2304,7 @@ int load_sysex_file(const char *filename){
 								len=fread(buf+SYSEX_HEADER_SIZE, 1, TONE_APR_SIZE-SYSEX_HEADER_SIZE, sysex_file);
 								if(len == TONE_APR_SIZE-SYSEX_HEADER_SIZE && buf[TONE_APR_SIZE-1] == 0xF7){
 									printf("Read tone parameters\n");
-									get_apr_tone_parameters(buf+7, tone_parameters, tone_name);
+									set_tone_parameters_from_apr(buf+7, tone_parameters, tone_name);
 									current_tone_valid=true;
 								}else{
 									fprintf(stderr,"ERROR: invalid tone parameters\n");
@@ -2314,7 +2315,7 @@ int load_sysex_file(const char *filename){
 								len=fread(buf+SYSEX_HEADER_SIZE, 1, PATCH_APR_SIZE-SYSEX_HEADER_SIZE, sysex_file);
 								if(len == PATCH_APR_SIZE-SYSEX_HEADER_SIZE && buf[PATCH_APR_SIZE-1] == 0xF7){
 									printf("Read patch parameters\n");
-									get_apr_patch_parameters(buf+7, patch_parameters, patch_name);
+									set_patch_parameters_from_apr(buf+7, patch_parameters, patch_name);
 									current_patch_valid=true;
 								}else{
 									fprintf(stderr,"ERROR: invalid patch parameters\n");
@@ -2325,7 +2326,7 @@ int load_sysex_file(const char *filename){
 								len=fread(buf+SYSEX_HEADER_SIZE, 1, CHORD_APR_SIZE-SYSEX_HEADER_SIZE, sysex_file);
 								if(len == CHORD_APR_SIZE-SYSEX_HEADER_SIZE && buf[CHORD_APR_SIZE-1] == 0xF7){
 									printf("Read chord notes\n");
-									get_apr_chord_notes(buf+7, chord_notes);
+									set_chord_notes_from_apr(buf+7, chord_notes);
 									current_chord_valid=true;
 								}else{
 									fprintf(stderr,"ERROR: invalid chord notes\n");
@@ -2557,14 +2558,14 @@ void set_bld_from_chord_memory(t_byte *buf){
 	buf[SYSEX_HEADER_SIZE+1]=0x00; // extension of program number
 	buf[SYSEX_HEADER_SIZE+2]=0x00; // program number
 	for(int i=0; i<CHORDS; i++){
-		// For some reason, chord note 7F (no note) appears as FF in chords bulk dump
 		memcpy(temp_notes, chord_memory[i], CHORD_NOTES);
 		for(int j=0; j<CHORD_NOTES; j++)
+			// For some reason, chord note 7F (no note) appears as FF in chords bulk dump
 			if (temp_notes[j]==0x7F){
 				temp_notes[j]=0xFF;
 			}else{
-				// Translate apr style to bld style
-				temp_notes[j]=temp_notes[j]-60+(temp_notes[j]<60?128:0);
+				// Translate apr format to bld format
+				temp_notes[j]=temp_notes[j]-CHORD_BASE_NOTE+(temp_notes[j]<CHORD_BASE_NOTE?128:0);
 			}
 		// hex_dump(temp_notes, CHORD_NOTES);
 		bytes_to_nibbles(temp_notes, buf+SYSEX_HEADER_SIZE+3+2*CHORD_NOTES*i, CHORD_NOTES);
