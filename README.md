@@ -49,11 +49,13 @@ Please use
 ```
 aconnect -i -o
 ```
-to show avalable inputs and outputs ids
+to show avalable inputs and outputs ids.
+
+Depending on your configuration, these may change at reboot.
 
 Examples:
 ```
-MKS50_editor -o 20:2 -i 20:2 PolySynth1.syx
+MKS50_editor -o 20:2 -i 20:2 init.syx
 MKS50_editor MKS50_tones_A.syx MKS50_tones_B.syx MKS50_patches_A.syx MKS50_patches_B.syx MKS50_cm.syx
 
 ```
