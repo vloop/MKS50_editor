@@ -56,7 +56,7 @@ Depending on your configuration, these may change at reboot.
 Examples:
 ```
 MKS50_editor -o 20:2 -i 20:2 init.syx
-MKS50_editor MKS50_tones_A.syx MKS50_tones_B.syx MKS50_patches_A.syx MKS50_patches_B.syx MKS50_cm.syx
+MKS50_editor init.syx init_patches_A.syx init_patches_B.syx init_tones.syx init_tones.syx init_chords.syx
 
 ```
 
@@ -64,11 +64,11 @@ On startup, the editor has no data, and has no way of requesting data from the M
 
 It can read preset files, but factory presets sysex files are not included with this program (because of possible copyright issues).
 
-You'll probably want to create your own set of startup sysexe files.
+Several init files are provided so you can start using the editor right away, however you'll probably want to create your own set of startup sysexe files.
 
-Getting data from the MKS-50 involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection).
+Getting data from the MKS-50 involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection, always the version with *, meaning no hadshake).
 
-However, this only needs to be done once, the data can then be saved to files from the editor.
+This only needs to be done once, the data can then be saved to files from the editor.
 
 After you have created your set of sysex files, they can be loaded on startup (or manually while using the editor), thus bypassing the tedious manual operations on the MKS-50.
 

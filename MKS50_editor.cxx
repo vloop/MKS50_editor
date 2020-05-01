@@ -8,9 +8,14 @@
  
 /* TODO
  * controls for all 13 patch parameters
- * ask before overwriting
- * ask before leaving unsaved changes
- * bug after name change in parameters, unduly recall tone?
+ * make sure changed flag is updated properly for recall, rename, store, load, save
+ * dynamic tooltips for the 6 tables: load when not valid, recall if valid
+ *   probably needs 3 set_ and 3 clear_ xxxx valid functions
+ * warn about handshake not supported
+ * buttons copy and paste for tables (single button changes from copy to paste?)
+ * is 0 patch and tone acceptable as valid, in banks and in current? (chords are not)
+ * indicate what waveshapes respond to pulse width (gray pw controls?)
+ *   requires special callback for wave shapes
  */
 
 #include "MKS50_editor.h"
@@ -26,7 +31,7 @@ snd_seq_t *seq_handle;
 int portid;
 int npfd;
 struct pollfd *pfd;
-t_byte midi_channel; // 0-based
+t_byte midi_channel=0; // 0-based
 t_byte midi_test_note=60;
 t_byte midi_test_velocity=80;
 
@@ -42,7 +47,8 @@ char tone_name[TONE_NAME_SIZE+1];
 Fl_Valuator* tone_controls[TONE_PARMS];
 
 typedef struct {
-	bool valid;
+	bool valid=false;
+	bool changed=false;
 	int program_offset=0;
 	// 64 tones to a bank
 	t_byte parameters[64][TONE_PARMS];
@@ -63,6 +69,7 @@ const char *dco_range_names[] = {"4'", "8'", "16'", "32'"};
 const char *on_off_names[] = {"Off", "On"};
 typedef struct {
 	bool valid=false;
+	bool changed=false;
 	int program_offset=0;
 	// 64 patches to a bank
 	t_byte parameters[64][PATCH_PARMS];
@@ -74,6 +81,8 @@ Patch_bank patch_bank_a, patch_bank_b;
 #define CHORDS 16
 #define CHORD_LEVEL 0x40
 #define CHORD_BASE_NOTE 0x3C
+#define CHORD_MIN_NOTE (CHORD_BASE_NOTE-24)
+#define CHORD_MAX_NOTE (CHORD_BASE_NOTE+24)
 t_byte chord_notes[CHORD_NOTES];
 // Note: chord notes are relative to CHORD_BASE_NOTE 7-bit signed
 // in apr and in chord_notes, 0x3C=60 means C4 means no transpose
@@ -83,12 +92,18 @@ t_byte chord_notes[CHORD_NOTES];
 Fl_Valuator* chord_note_controls[CHORD_NOTES];
 t_byte chord_memory[CHORDS][CHORD_NOTES];
 bool chord_memory_valid=false;
+bool chord_memory_changed=false;
 bool chord_from_apr=false;
 
 bool current_valid=false;
 bool current_patch_valid=false;
 bool current_tone_valid=false;
 bool current_chord_valid=false;
+
+bool current_changed=false;
+bool current_patch_changed=false;
+bool current_tone_changed=false;
+bool current_chord_changed=false;
 
 #define PATCH_BLD_SIZE 266
 #define TONE_BLD_SIZE 266
@@ -98,8 +113,8 @@ bool current_chord_valid=false;
 #define CHORD_APR_SIZE 14
 
 #define SYSEX_MAX_SIZE 266
-
 #define SYSEX_HEADER_SIZE 6
+
 #define OP_APR 0x35
 #define OP_BLD 0x37
 
@@ -137,7 +152,6 @@ Fl_Input *txt_chord=(Fl_Input *)0;
 Fl_Input *txt_midi_channel=(Fl_Input *)0;
 Fl_Input *txt_test_note=(Fl_Input *)0;
 Fl_Input *txt_test_vel=(Fl_Input *)0;
-
 Fl_Toggle_Button *btn_store_chord=(Fl_Toggle_Button *)0;
 
 ////////////////////
@@ -179,8 +193,6 @@ static void show_err ( const char * format, ... ){
 	char s[1024];
 	va_list args;
     va_start(args, format);
-    // printf("format: \"%s\"\n", format); // ok
-    // fprintf(stderr, format, args);
     vsnprintf(s, 1024, format, args);
     fprintf(stderr, "%s\n", s);
     fl_alert("%s", s);
@@ -209,6 +221,7 @@ int strtonote(const char* str, const char **endptr){
 		ptr++;
 		// check for alteration (single or double)
 		if (*ptr=='#') {ptr++; note++; if (*ptr=='#') {ptr++; note++;}}
+		else if (*ptr=='x' || *ptr=='X') {ptr++; note+=2;}
 		else if (*ptr=='b') {ptr++; note--; if (*ptr=='b') {ptr++; note--;}}
 		// get octave
 		octave=strtol(ptr, &ptr2, 10)+1;
@@ -227,7 +240,7 @@ int strtonote(const char* str, const char **endptr){
 			ptr=str;
 		}
 	}else{
-		// Illegal note
+		// Illegal note name
 		if (*ptr) fprintf(stderr, "Cannot convert '%c' (%u) to note\n", c, c);
 		note=-1;
 		ptr=str;
@@ -284,19 +297,22 @@ t_byte char_to_mks50(const char c){
 }
 
 int nibbles_to_bytes(const t_byte *src, t_byte *dest, int byte_count){
+	bool illegal=false;
 	while((byte_count--)>0){
 		// Check legal nibbles <16
 		if (*src>15){
 			fprintf(stderr,"ERROR: illegal nibble value %u \n", (int)(*src));
+			illegal=true;
 		}
 		if (*(src+1)>15){
 			fprintf(stderr,"ERROR: illegal nibble value %u \n", (int)(*(src+1)));
+			illegal=true;
 		}
 		*dest = *src + (*(src+1) << 4); // Least significant nibble first
 		src+=2; // Two nibbles to a byte
 		dest++;	
 	}
-	return (0);
+	return (illegal);
 }
 
 int bytes_to_nibbles(const t_byte *src, t_byte *dest, int byte_count){
@@ -312,12 +328,17 @@ int bytes_to_nibbles(const t_byte *src, t_byte *dest, int byte_count){
 
 void get_mks50_name(const t_byte *src, char *dest, int len){
 	for(int i=0; i<len; i++){
+		// Just ignore high bits (used for other purposes in bld)
 		*dest++=mks50_chars[(*src++) & 0x3F];
 	}
 	*dest=0;
 }
 
+/** Translate an ascii string to 6-bit encoded
+ */
+
 void set_mks50_name(const char *src, t_byte *dest, int len){
+	// Will always set len characters, padding with spaces if needed
 	int i;
 	char c;
 	t_byte d;
@@ -332,8 +353,6 @@ void set_mks50_name(const char *src, t_byte *dest, int len){
 		*dest++=d;
 	}
 }
-
-
 
 ///////////////////////////////////////////////////////////////
 // MKS-50 specific tone, patch and chords handling functions //
@@ -357,22 +376,30 @@ void set_apr_from_tone_parameters(const t_byte *tone_parameters, const char* ton
 	*buf++=0x01; // Group
 	for (int i=0; i < TONE_PARMS; i++)
 		*buf++=tone_parameters[i];
-	for (int i=0; i < TONE_NAME_SIZE; i++)
-		*buf++=char_to_mks50(tone_name[i]);
+	for (int i=0; i < TONE_NAME_SIZE; i++){
+		*buf++=char_to_mks50(*tone_name);
+		if (*tone_name) tone_name++;
+	}
 	*buf++=0xF7;
 }
 
 /** Translate patch parameters and name to apr sysex message
  */
-void set_apr_from_patch(const t_byte *patch_parameters, const char* patch_name, t_byte* buf){
+void set_apr_from_patch_parameters(const t_byte *patch_parameters, const char* patch_name, t_byte* buf){
 	// buf must be at least 31 bytes
 	buf+=make_MKS50_sysex_header(buf, midi_channel, OP_APR, PATCH_LEVEL);
 	*buf++=0x01; // Group
 	for (int i=0; i < PATCH_PARMS; i++){
-		if (i==12) // key mode
-			*buf++=key_mode_map[patch_parameters[i]];
-		else // Regular parameter
+		if (i==12){ // key mode
+			if(patch_parameters[i]>2){
+				fprintf(stderr, "Illegal key mode %u\n", patch_parameters[i]);
+				*buf++=key_mode_map[0];
+			}else{
+				*buf++=key_mode_map[patch_parameters[i]];
+			}
+		}else{ // Regular parameter
 			*buf++=patch_parameters[i];
+		}
 	}
 	for (int i=0; i < PATCH_NAME_SIZE; i++)
 		*buf++=char_to_mks50(patch_name[i]);
@@ -566,7 +593,6 @@ void set_tones_from_chunk(const t_byte *chunk, Tone_bank * tone_bank){
 	t_byte *tone_parameters;
 	char *tone_name;
 	int program=chunk[8]; // First tone number in chunk
-	printf("Starting at tone #%u\n", program);
 	for (int i=0; i<4; i++, program++){
 		tone_parameters=tone_bank->parameters[program];
 		tone_name=tone_bank->names[program];
@@ -628,7 +654,6 @@ void set_bld_from_patch_parameters(const t_byte *patch_parameters, const char *p
     b01 = (patch_parameters[12] >> 1) & 1; // key_assign_mode
     b02 = patch_parameters[12] & 1; // key_assign_mode
     b03 = patch_parameters[4] & 1; // porta_switch
-    // printf("%u %u\n", b01, b02);
     *buf++= (b00 << 7) + (b01 << 6) + (b02 << 5) + (b03 << 4);
 	set_mks50_name(patch_name, buf, PATCH_NAME_SIZE); // patch_name
 	buf+=PATCH_NAME_SIZE;
@@ -636,8 +661,6 @@ void set_bld_from_patch_parameters(const t_byte *patch_parameters, const char *p
     memset(buf, 0, 10);
     buf+=10;
     *buf=0x10; // Patch data code
-    // printf("%lu\n", buf-temp_buf); // -> 31 ok
-    // hex_dump(temp_buf, 32); // looks ok
 	bytes_to_nibbles(temp_buf, nibbles, 32); // 64 nibbles
 }
 
@@ -678,7 +701,7 @@ void set_chunk_from_patches(const Patch_bank * patch_bank, t_byte *blk, int prog
 }
 
 void set_chunk_from_tones(const Tone_bank * tone_bank, t_byte *blk, int program ){
-	// A chunk holds 4 sets of patch parameters
+	// A chunk holds 4 sets of tone parameters
 	// blk must be able to hold 266 bytes
 	const t_byte *tone_parameters;
 	const char *tone_name;
@@ -706,12 +729,10 @@ void set_chunk_from_tones(const Tone_bank * tone_bank, t_byte *blk, int program 
 void set_chord_memory_from_bld(const t_byte *buf, t_byte chord_memory[16][6]){
 	for(int i=0; i<16; i++){
 		nibbles_to_bytes(buf+9+2*CHORD_NOTES*i, chord_memory[i], CHORD_NOTES);
-		hex_dump(chord_memory[i], CHORD_NOTES);
 		// Unlike apr which uses the actual midi not number, bld uses an offset
 		// 0 is C4, range is -24..+24 signed 7-bit value, 127 means off
-		// For some reason, 7F is represented as FF in bulk dump ??
 		for(int j=0; j<CHORD_NOTES; j++)
-			// chord_memory[i][j] &= 0x7F; // Clear bit 7
+			// For some reason, 7F is represented as FF in bulk dump ??
 			if(chord_memory[i][j]==0xFF){
 				chord_memory[i][j]=0x7F;
 			}else{
@@ -727,17 +748,12 @@ int sprint_chord(char *s, const t_byte * chord){
 	int note;
 	for(int i=0; i<CHORD_NOTES; i++){
 		if (chord[i]<127){ // dont' print special value 127 (or above)
-			// note = 60 + (chord[i]>63?(int)chord[i]-128:(int)chord[i]);
 			note=chord[i];
-			// printf("%u\n", note);
-			// s0+=sprintf(s0, "%d ", chord[i]>63?(int)chord[i]-128:(int)chord[i]);		
 			s0+=sprint_note(s0, note);		
 		}else{
 			s0+=sprintf(s0, "off ");
 		}
-		// printf("%u ",chord[i]);
 	}
-	// printf("\n");
 	return(s0-s);
 }
 
@@ -745,7 +761,6 @@ void redraw_tone_parameters(){
 //	Fl::lock();
 	for (int i=0; i < TONE_PARMS; i++){
 		if (tone_controls[i]){
-			 // FIXME ?? how do we handle different control types 
 			tone_controls[i]->value(tone_parameters[i]);
 			tone_controls[i]->redraw();
 #ifdef _DEBUG											
@@ -788,9 +803,9 @@ void redraw_patch_parameters(){
 			patch_controls[i]->redraw();
 #ifdef _DEBUG											
 			printf("Redraw patch parameter #%u\n", i);
-#endif											
 		}else{
 			fprintf(stderr, "No control for patch parameter #%u\n", i);
+#endif											
 		}
 	}
 	if(txt_patch_name){
@@ -817,16 +832,18 @@ void redraw_patch_parameters(){
 void set_patch_parameters_from_apr(const t_byte *buf, t_byte *patch_parameters, char *patch_name){
 	// Translate apr to patch data and display
 	// buf points to sysex APR data, past 7 bytes sysex header
-	char *k;
+	t_byte j;
 	for (int i=0; i < PATCH_PARMS; i++){
-		if(i==12){ // Key mode
-			k=strchr((char *)key_mode_map, (char)buf[i]);
-			if(k){
-				patch_parameters[i]=k-(char *)key_mode_map;
-			}else{
-				patch_parameters[i]=0;
-				fprintf(stderr,"ERROR: invalid key mode %02x\n", buf[i]);
+		if(i==12){ // Key mode parameter needs special mapping
+			if(buf[i]==key_mode_map[0]){ j=0;
+			}else if(buf[i]==key_mode_map[1]){ j=1;
+			}else if(buf[i]==key_mode_map[2]){ j=2;
+			}else {
+				fprintf(stderr,"ERROR: invalid key mode 0x%02x\n", buf[i]);
+				j=0; // Fallback to poly
 			}
+			// printf("0x%02x -> 0x%02x\n", buf[i], j);			
+			patch_parameters[i]=j;
 		}else{ // Regular parameter
 			patch_parameters[i]=buf[i];
 		}
@@ -836,23 +853,11 @@ void set_patch_parameters_from_apr(const t_byte *buf, t_byte *patch_parameters, 
 	patch_name[PATCH_NAME_SIZE]=0;
 	printf("Got all patch parameters for %s\n", patch_name);
 	redraw_patch_parameters();
+	// printf("chord %u\n",patch_parameters[11]);
 }
 
 void redraw_chord_notes(){
 //	Fl::lock();
-	// Individual chord note fields currently not implemented
-	/*
-	for (int i=0; i < CHORD_NOTES; i++){
-		if (chord_note_controls[i]){
-			 // FIXME ?? how do we handle different control types 
-			chord_note_controls[i]->value(chord_notes[i]);
-			chord_note_controls[i]->redraw();
-#ifdef _DEBUG											
-			printf("Redraw chord note #%u\n", i);
-#endif											
-		}
-	}
-	*/
 	if(txt_chord){
 		static char s[5*CHORD_NOTES];
 		sprint_chord(s, chord_notes);
@@ -866,7 +871,6 @@ void redraw_chord_notes(){
 void set_chord_notes_from_apr(const t_byte *buf, t_byte *chord_notes){
 	// Translate apr to chord data and display
 	// buf points to sysex APR data, past 7 bytes sysex header
-	// hex_dump(buf, CHORD_NOTES);
 	for (int i=0; i < CHORD_NOTES; i++){
 		chord_notes[i]=buf[i];
 	}
@@ -913,8 +917,6 @@ snd_seq_t *open_seq() {
 	fprintf(stderr, "Error creating sequencer port.\n");
 	exit(1);
   }
-//  int client = snd_seq_client_id(seq_handle);
-//  printf("client %u\n", client);
   return(seq_handle);
 }
 
@@ -1073,7 +1075,7 @@ static void send_current_patch(){
 	// Sends current chord over MIDI
 	t_byte buf[PATCH_APR_SIZE];
 	if(current_patch_valid){
-		set_apr_from_patch(patch_parameters, patch_name, buf);
+		set_apr_from_patch_parameters(patch_parameters, patch_name, buf);
 		send_sysex(buf, PATCH_APR_SIZE);
 		printf("Sent current patch\n");
 	}else{
@@ -1107,9 +1109,13 @@ int recall_chord(unsigned int chord_num){
 	redraw_chord_notes();
 
 	current_chord_valid=true;
+	current_chord_changed=false;
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
 	chord_from_apr=false;
 	current_valid=current_patch_valid && current_chord_valid && current_chord_valid;
 	if (auto_send) send_current_chord();
+
+// Should we set chord number in patch parameters ??
 
 	return(0);
 }
@@ -1134,7 +1140,10 @@ int recall_tone(unsigned int tone_num){
 	redraw_tone_parameters();
 
 	current_tone_valid=true;
+	current_tone_changed=false;
 	current_valid=current_patch_valid && current_tone_valid && current_chord_valid;
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
+
 	if (auto_send) send_current_tone();
 
 	return(0);
@@ -1176,6 +1185,8 @@ int recall_patch(unsigned int patch_num){
 	memcpy(patch_parameters, patch_bank->parameters[program], PATCH_PARMS);
 	memcpy(patch_name, patch_bank->names[program], PATCH_NAME_SIZE+1);
 	current_patch_valid=true;
+	current_patch_changed=false;
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
 	redraw_patch_parameters();
 	
 	recall_tone(tone_num);
@@ -1187,18 +1198,19 @@ int recall_patch(unsigned int patch_num){
 	return(0);
 }
 
-int store_patch(unsigned int patch_num){
+int store_patch(unsigned int patch_num, bool forced){
 	// Implicit source is edit buffer
+	// Destination includes patch, tone and chord
 	// Destination is in bank b for patch numbers above 63
 	Patch_bank *patch_bank;
 	Tone_bank *tone_bank;
 	patch_bank=patch_num>63 ? &patch_bank_b : &patch_bank_a;
-	// Always the same bank for tone and patch
+	// Not always the same bank for tone and patch
 	// tone_bank=patch_num>63 ? &tone_bank_b : &tone_bank_a;
 
     // Don't allow setting a patch when the bank has not been init'ed
     // This would create a partly valid bank
-	if(!patch_bank->valid || !chord_memory_valid){
+	if(!forced &&(!patch_bank->valid || !chord_memory_valid)){
 		fprintf(stderr,"ERROR: patch or chord data not set\n");
 		return(-1); // ?? store whatever is available anyway
 	}
@@ -1209,36 +1221,42 @@ int store_patch(unsigned int patch_num){
 
 	int program, tone, chord;
 	program=patch_num & 0x3F;
-	tone=patch_parameters[0];
+	tone=forced?patch_num:patch_parameters[0];
+	patch_parameters[0]=tone;
 	tone_bank=tone>63 ? &tone_bank_b : &tone_bank_a;
 	chord=patch_parameters[11];
-	if (!tone_bank->valid){
+	
+	if (!forced && !tone_bank->valid){
 		fprintf(stderr,"ERROR: tone data not set\n");
-		return(-1); // ?? store whatever is available anyway
+		return(-1);
 	}
 
 	printf("Storing to patch #%u, tone #%u, chord #%u\n", patch_num, tone, chord);
 
 	memcpy(patch_bank->parameters[program], patch_parameters, PATCH_PARMS);
 	memcpy(patch_bank->names[program], patch_name, PATCH_NAME_SIZE+1);
+	patch_bank->changed=true;
 	if (tone_bank->valid){
 		memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
 		memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
+		tone_bank->changed=true;
 	}
-	if (chord_memory_valid)
+	if (chord_memory_valid){
 		memcpy(chord_memory[chord], chord_notes, CHORD_NOTES);
+		chord_memory_changed=true;
+	}
 	
 	return(0);
 }
 
-int store_tone(unsigned int tone_num){
+int store_tone(unsigned int tone_num, bool forced){
 	// Implicit source is edit buffer
 	Tone_bank *tone_bank;
 	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
 
     // Don't allow setting a tone when the bank has not been init'ed
     // This would create a partly valid bank
-	if(!tone_bank->valid || !current_tone_valid){
+	if(!forced &&(!tone_bank->valid || !current_tone_valid)){
 		fprintf(stderr,"ERROR: tone data not set\n");
 		return(-1);
 	}
@@ -1254,12 +1272,15 @@ int store_tone(unsigned int tone_num){
 
 	// Update current patch and gui to reflect new tone number
 	patch_parameters[0]=tone_num;
+	current_patch_changed=true;
+	current_changed=true;
 	if(txt_tone_num){
 		char s[4];
 		sprintf(s, "%u", tone_num);
 		txt_tone_num->value(s);
 		txt_tone_num->redraw();
 	}
+	tone_bank->changed=true;
 	
 	memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
 	memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
@@ -1275,7 +1296,7 @@ int store_tone(unsigned int tone_num){
 class PatchTable : public Fl_Table
 {
 protected:
-	void draw_cell(TableContext context, // table cell drawing
+	void draw_cell(TableContext context,
 				int R=0, int C=0, int X=0, int Y=0, int W=0, int H=0);
 	static void event_callback(Fl_Widget*, void*);
 	void event_callback2(Patch_bank *pb);	// callback for table events
@@ -1308,12 +1329,12 @@ int rename_patch(unsigned int patch_num){
 	}
 	const char *new_name=fl_input("Please enter new patch name", patch_bank->names[program]);
 	if (new_name){
-		// memset(patch_bank->names[program], ' ', PATCH_NAME_SIZE)
 		strncpy(patch_bank->names[program], new_name, PATCH_NAME_SIZE);
 		if (patch_num>63) patch_table_b->redraw();
 		else patch_table_a->redraw();
 		// if (strlen(new_name)<PATCH_NAME_SIZE)
 		//	patch_bank->names[program][strlen(new_name)]=' ';
+		patch_bank->changed=true;
 	}
 }
 
@@ -1348,8 +1369,6 @@ void PatchTable::draw_cell(TableContext context,
 
 		// TEXT
 		fl_color(FL_BLACK);
-		// sprintf(s, "%d/%d", R, C); // text for sound number cell
-		// fl_draw(s, X+1, Y, W-1, H, FL_ALIGN_LEFT);
 		fl_draw(patches()->names[R*8+C], X+1, Y, W-1, H, FL_ALIGN_CENTER);
 
 		// BORDER
@@ -1390,7 +1409,7 @@ void PatchTable::event_callback2(Patch_bank *pb)
 #endif		
 		if (btn_store_patch->value()){
 			if(pb->valid && current_patch_valid){
-				store_patch(program);
+				store_patch(program, false);
 			}else{
 				show_err("No patch data, cannot store!");
 			}
@@ -1450,6 +1469,7 @@ int rename_tone(unsigned int tone_num){
 		else tone_table_a->redraw();
 		// if (strlen(new_name)<PATCH_NAME_SIZE)
 		//	tone_bank->names[program][strlen(new_name)]=' ';
+		tone_bank->changed=true;
 	}
 }
 
@@ -1470,7 +1490,7 @@ void ToneTable::event_callback2(Tone_bank *pb)
 #endif		
 		if (btn_store_tone->value()){
 			if(pb->valid && current_patch_valid){
-				store_tone(program);
+				store_tone(program, false);
 			}else{
 				show_err("No tone data, cannot store!");
 			}
@@ -1515,8 +1535,6 @@ void ToneTable::draw_cell(TableContext context,
 
 		// TEXT
 		fl_color(FL_BLACK);
-		// sprintf(s, "%d/%d", R, C); // text for sound number cell
-		// fl_draw(s, X+1, Y, W-1, H, FL_ALIGN_LEFT);
 		fl_draw(tones()->names[R*8+C], X+1, Y, W-1, H, FL_ALIGN_CENTER);
 
 		// BORDER
@@ -1567,12 +1585,12 @@ public:
 
 ChordTable *chord_table_1, *chord_table_2;
 
-int store_chord(unsigned int chord_num){
+int store_chord(unsigned int chord_num, bool forced){
 	// Implicit source is edit buffer
 
-    // Don't allow setting a chord when the bank has not been init'ed
-    // This would create a partly valid bank
-	if(!chord_memory_valid || !current_chord_valid){
+    // Don't allow setting a chord when the chord memory has not been init'ed
+    // This would create a partly valid chord memory
+	if(!forced &&(!chord_memory_valid || !current_chord_valid)){
 		fprintf(stderr,"ERROR: chord data not set\n");
 		return(-1);
 	}
@@ -1583,7 +1601,7 @@ int store_chord(unsigned int chord_num){
 	
 	printf("Storing to chord #%u\n", chord_num);
 
-	patch_parameters[11]=chord_num;
+	if (!forced) patch_parameters[11]=chord_num; // Make this chord current
 	memcpy(chord_memory[chord_num], chord_notes, CHORD_NOTES);
 
 	if(chord_num>7){
@@ -1591,6 +1609,7 @@ int store_chord(unsigned int chord_num){
 	}else{
 		if(chord_table_1) chord_table_1->redraw();
 	}
+	chord_memory_changed=true;
 	return(0);
 }
 
@@ -1615,7 +1634,7 @@ void ChordTable::event_callback2(int offset)
 #endif		
 		if (btn_store_chord->value()){
 			if(chord_memory_valid && current_chord_valid){
-				store_chord(chord_num);
+				store_chord(chord_num, false);
 			}else{
 				show_err("No chord data, cannot store!");
 			}
@@ -1657,7 +1676,6 @@ void ChordTable::draw_cell(TableContext context,
 
 		// TEXT
 		fl_color(FL_BLACK);
-		// sprintf(s, "%d/%d", R, C); // text for sound number cell
 		sprint_chord(s, chord_memory[R+offset()]);
 		fl_draw(s, X+1, Y, W-1, H, FL_ALIGN_LEFT);
 
@@ -1709,7 +1727,6 @@ static void *alsa_midi_process(void *handle) {
 //	pthread_setschedparam(pthread_self(), policy, &param);
 
   snd_seq_event_t *ev; // event data is up to 12 bytes
-  // snd_seq_ev_ext_t *evx; // for sysex
   t_byte *ptr;
   int len, errs, channel, got, needed, program, op, level;
 
@@ -1746,8 +1763,8 @@ static void *alsa_midi_process(void *handle) {
 							set_tones_from_chunk(bulk_buffer, is_tone_bank_b? &tone_bank_b:&tone_bank_a);
 							if(bulk_buffer[8]==60){ // hack - if last chunk, tone number is 60
 								printf("Tone bank %c complete\n", is_tone_bank_b?'B':'A');
-								if (is_tone_bank_b){ tone_bank_b.valid=true; }
-								else{ tone_bank_a.valid=true; }
+								if (is_tone_bank_b){ tone_bank_b.valid=true; tone_bank_b.changed=true;}
+								else{ tone_bank_a.valid=true; tone_bank_a.changed=true;}
 								is_tone_bank_b=!is_tone_bank_b;
 							}
 							break;
@@ -1756,8 +1773,8 @@ static void *alsa_midi_process(void *handle) {
 							set_patches_from_chunk(bulk_buffer, is_patch_bank_b? &patch_bank_b:&patch_bank_a);
 							if(bulk_buffer[8]==60){ // hack - if last chunk, patch number is 60
 								printf("Patch bank %c complete\n", is_patch_bank_b?'B':'A');
-								if (is_patch_bank_b){ patch_bank_b.valid=true; }
-								else{ patch_bank_a.valid=true; }
+								if (is_patch_bank_b){ patch_bank_b.valid=true; patch_bank_b.changed=true;}
+								else{ patch_bank_a.valid=true; patch_bank_a.changed=true;}
 								is_patch_bank_b=!is_patch_bank_b;
 							}
 							break;
@@ -1770,108 +1787,97 @@ static void *alsa_midi_process(void *handle) {
 				}
 				bulk_pending=false;
 			}else{ // No pending data, this should be a new sysex message
-//				if(ptr[0]!=0xF0) {fprintf(stderr, "ERROR: No sysex header\n"); errs++;}
-//				if(ptr[1]!=0x41) {fprintf(stderr, "ERROR: Not a Roland sysex\n"); errs++;}
 				if(parse_MKS50_sysex_header(ptr, channel, op, level)) errs++;
 				if(errs==0){
-					// channel=ptr[3];
-//					if(ptr[4]=0x23){ // MKS-50 etc.
-						// op=ptr[2];
-						if(op==OP_APR) { // "APR" All parameters
-							/* Example of APR data sent by the MKS-50		
-							alsa_midi_process: sysex event, received 31 bytes. (all patch parameters
-							f0 41 35 00 23 30 01 01 0c 6d 14 00 20 00 7f 00 00 0c 00 00 09 1a 33 33 06 2e 22 2d 1a 2b f7 
-							alsa_midi_process: sysex event, received 14 bytes. (chord memory)
-							f0 41 35 00 23 40 01 3c 7f 7f 7f 7f 7f f7 
-							alsa_midi_process: sysex event, received 54 bytes.  (all tone parameters)
-							f0 41 35 00 23 20 01 00 02 02 03 00 00 02 00 00 00 00 00 00 28 27 00 2b 00 00 6b 50 00 68 00 56 2a 00 7f 22 68 4a 00 2c 28 47 02 09 1a 33 33 06 2e 22 2d 1a 2b f7
-							*/
-							if (ptr[len-1]==0Xf7) { // APR sysex is shorter than buffer !!
-								switch(level){
-									case TONE_LEVEL:
-										if(len==TONE_APR_SIZE){
-											set_tone_parameters_from_apr(ptr+7, tone_parameters, tone_name);
-											current_tone_valid=true;
-											// redraw_tone_parameters();
-										}else{
-											fprintf(stderr, "ERROR: Not a tone parameter apr sysex\n");
-											errs++;
-										}
-										break;
-									case PATCH_LEVEL:
-										if(len==PATCH_APR_SIZE){
-											set_patch_parameters_from_apr(ptr+7, patch_parameters, patch_name);
-											current_patch_valid=true;
-											// redraw_patch_parameters();
-										}else{
-											fprintf(stderr, "ERROR: Not a patch parameter apr sysex\n");
-											errs++;
-										}
-										break;
-									case CHORD_LEVEL:
-										if(len==CHORD_APR_SIZE){
-											/*
-											for (int i=0; i < CHORD_NOTES; i++)
-												chord_notes[i]=ptr[i+7];
-											printf("Got current chord\n");
-											*/
-											set_chord_notes_from_apr(ptr+7, chord_notes);
-											current_chord_valid=true;
-											chord_from_apr=true;
-											redraw_chord_notes();
-										}else{
-											fprintf(stderr, "ERROR: Not a chord apr sysex\n");
-											errs++;
-										}
-										break;
-									default:
-										fprintf(stderr, "ERROR: unknown sysex level %02x\n", ptr[5]);
-										errs++;
-								} // end of switch level
-								current_valid=current_patch_valid && current_tone_valid && current_chord_valid;
-							}else{
-								fprintf(stderr, "ERROR: no end of sysex %02x\n", ptr[len-1]);
-								errs++;
-							}
-						}else if(op==OP_BLD){ // "BLD" bulk dump
-							// level=ptr[5];
-							if(level == TONE_LEVEL || level == PATCH_LEVEL){
-								needed=(level== TONE_LEVEL)?TONE_BLD_SIZE:PATCH_BLD_SIZE;
-								// These dumps are longer and require extra buffering
-								bulk_ptr=bulk_buffer;
-								if(ptr[len-1]!=0Xf7){ // More data needed
-									memcpy(bulk_ptr, ptr, len);
-									printf("Received start of bulk dump, length %u, level %u\n", len, level);
-									bulk_ptr+= len;
-									bulk_pending=true;
-								}else{
-									if(len==needed){
-										printf("Received complete bulk dump in one event\n");
-										// TODO handle bulk data
-										// This is needed only if alsa buffer is more than 266 bytes
+					if(op==OP_APR) { // "APR" All parameters
+						/* Example of APR data sent by the MKS-50		
+						alsa_midi_process: sysex event, received 31 bytes. (all patch parameters
+						f0 41 35 00 23 30 01 01 0c 6d 14 00 20 00 7f 00 00 0c 00 00 09 1a 33 33 06 2e 22 2d 1a 2b f7 
+						alsa_midi_process: sysex event, received 14 bytes. (chord memory)
+						f0 41 35 00 23 40 01 3c 7f 7f 7f 7f 7f f7 
+						alsa_midi_process: sysex event, received 54 bytes.  (all tone parameters)
+						f0 41 35 00 23 20 01 00 02 02 03 00 00 02 00 00 00 00 00 00 28 27 00 2b 00 00 6b 50 00 68 00 56 2a 00 7f 22 68 4a 00 2c 28 47 02 09 1a 33 33 06 2e 22 2d 1a 2b f7
+						*/
+						if (ptr[len-1]==0Xf7) { // APR sysex is shorter than buffer !!
+							switch(level){
+								case TONE_LEVEL:
+									if(len==TONE_APR_SIZE){
+										set_tone_parameters_from_apr(ptr+7, tone_parameters, tone_name);
+										current_tone_valid=true;
+										current_tone_changed=true;
+										current_changed=true;
 									}else{
-										fprintf(stderr, "ERROR: unexpected bulk dump length operation %u\n", len); errs++;
+										fprintf(stderr, "ERROR: Not a tone parameter apr sysex\n");
+										errs++;
 									}
-								}
-							}else if(level==CHORD_LEVEL){
-								printf("Received chord memory dump\n");
-								set_chord_memory_from_bld(ptr, chord_memory);
-								chord_memory_valid=true;
-								chord_table_1->redraw();
-								chord_table_2->redraw();
-							}else{
-								fprintf(stderr, "ERROR: unknown level %02x\n", level); errs++;
-							}
+									break;
+								case PATCH_LEVEL:
+									if(len==PATCH_APR_SIZE){
+										set_patch_parameters_from_apr(ptr+7, patch_parameters, patch_name);
+										current_patch_valid=true;
+										current_patch_changed=true;
+										current_changed=true;
+									}else{
+										fprintf(stderr, "ERROR: Not a patch parameter apr sysex\n");
+										errs++;
+									}
+									break;
+								case CHORD_LEVEL:
+									if(len==CHORD_APR_SIZE){
+										set_chord_notes_from_apr(ptr+7, chord_notes);
+										current_chord_valid=true;
+										current_chord_changed=true;
+										current_changed=true;
+										chord_from_apr=true;
+										redraw_chord_notes();
+									}else{
+										fprintf(stderr, "ERROR: Not a chord apr sysex\n");
+										errs++;
+									}
+									break;
+								default:
+									fprintf(stderr, "ERROR: unknown sysex level %02x\n", ptr[5]);
+									errs++;
+							} // end of switch level
+							current_valid=current_patch_valid && current_tone_valid && current_chord_valid;
 						}else{
-							fprintf(stderr, "ERROR: unknown operation %02x\n", op); errs++;
+							fprintf(stderr, "ERROR: no end of sysex %02x\n", ptr[len-1]);
+							errs++;
 						}
-					// }else{
-					// 	fprintf(stderr, "ERROR: Not a MKS-50 sysex\n"); errs++;
-					// }
+					}else if(op==OP_BLD){ // "BLD" bulk dump
+						if(level == TONE_LEVEL || level == PATCH_LEVEL){
+							needed=(level== TONE_LEVEL)?TONE_BLD_SIZE:PATCH_BLD_SIZE;
+							// These dumps are longer and require extra buffering
+							bulk_ptr=bulk_buffer;
+							if(ptr[len-1]!=0Xf7){ // More data needed
+								memcpy(bulk_ptr, ptr, len);
+								printf("Received start of bulk dump, length %u, level %u\n", len, level);
+								bulk_ptr+= len;
+								bulk_pending=true;
+							}else{
+								if(len==needed){
+									printf("Received complete bulk dump in one event\n");
+									// TODO handle bulk data ??
+									// This is needed only if alsa buffer is more than 266 bytes
+								}else{
+									fprintf(stderr, "ERROR: unexpected bulk dump length operation %u\n", len); errs++;
+								}
+							}
+						}else if(level==CHORD_LEVEL){
+							printf("Received chord memory dump\n");
+							set_chord_memory_from_bld(ptr, chord_memory);
+							chord_memory_valid=true;
+							chord_table_1->redraw();
+							chord_table_2->redraw();
+						}else{
+							fprintf(stderr, "ERROR: unknown level %02x\n", level); errs++;
+						}
+					}else{
+						fprintf(stderr, "ERROR: unknown operation %02x\n", op); errs++;
+					}
 				} // end if errs==0
 			} // end of if bulk pending
 			// bulk dump: buffer seems to be 256 bytes, 266 needed
-			// TODO Should loop until f7 is received
 		    break;
 		case SND_SEQ_EVENT_PGMCHANGE:
 			// Unfortunately the MKS-50 doesn't send program change messages
@@ -1972,7 +1978,6 @@ void write_sysex_file(const t_byte *buf, const int len, const char *filename, bo
 			printf("Writing %u bytes to %s\n", len, filename3);
 			fwrite(buf, 1, len, sysex_file);
 			fclose(sysex_file);
-			// printf("4) at %p:\n", buf+9); hex_dump(buf+9, 64);
 		}
 		free(filename2);
 	}else{
@@ -1995,7 +2000,7 @@ void fc_save_current_callback(Fl_File_Chooser *w, void *userdata){
 		dest+=TONE_APR_SIZE;
 	}
 	if(current_patch_valid){
-		set_apr_from_patch(patch_parameters, patch_name, dest);
+		set_apr_from_patch_parameters(patch_parameters, patch_name, dest);
 		dest+=PATCH_APR_SIZE;
 	}
 	if(current_chord_valid){
@@ -2004,6 +2009,10 @@ void fc_save_current_callback(Fl_File_Chooser *w, void *userdata){
 	}
 	if(dest>buf)
 		write_sysex_file(buf, dest-buf, w->value(), w->filter_value() == 0);
+	current_changed=false;
+	current_chord_changed=false;
+	current_patch_changed=false;
+	current_tone_changed=false;
 }
 
 static void btn_save_current_callback(Fl_Widget* o, void*) {
@@ -2041,6 +2050,7 @@ static void set_parm(t_byte parm_num, t_byte parm_val){
 		}
 		patch_parameters[short_parm_num]=parm_val;
 		printf("set patch parameter #%u to %u\n", short_parm_num, parm_val);
+		current_patch_changed=true;
 	}else{ // Tone parm
 		if (short_parm_num>TONE_PARMS){
 			fprintf(stderr, "ERROR: Illegal tone parameter number %u\n", short_parm_num);
@@ -2048,8 +2058,10 @@ static void set_parm(t_byte parm_num, t_byte parm_val){
 		}
 		tone_parameters[short_parm_num]=parm_val;
 		printf("set tone parameter #%u to %u\n", short_parm_num, parm_val);
+		current_tone_changed=true;
 	}
-	
+	current_changed=true;
+
 	sysex[3]=midi_channel;
 	sysex[5]=is_patch_parm ? 0x30: 0x20;
 	sysex[7]=short_parm_num;
@@ -2099,27 +2111,21 @@ static void parm_chord_callback(Fl_Widget* o, void*) {
 
 static void txt_chord_callback(Fl_Widget* o, void*) {
 	// implicit destination is current chord (chord_notes)
-	// printf("input: %s\n", ((Fl_Input *)o)->value());
 	const char *ptr=((Fl_Input *)o)->value();
 	const char *ptr2;
 	const char **ptrptr2=&ptr2;
+	char s[5];
 	int note, errs=0;
 	for (int i=0; i<CHORD_NOTES; i++){
 		note=strtonote(ptr, ptrptr2);
 		if (note>=0){ // Valid note
-			if(note>=24 && note<=72){ // MKS50 range for chords
+			if(note>=CHORD_MIN_NOTE && note<=CHORD_MAX_NOTE){ // MKS50 range for chords
 				ptr=*ptrptr2;
 				chord_notes[i]=note; // apr format
-				/* bld format
-				if(note<48){ // down
-					chord_notes[i]=128+note-48;
-				}else{ // up
-					chord_notes[i]=note-48;
-				}
-				*/
 			}else{
 				chord_notes[i]=127; // Special value for off
-				show_err("Note out of chord range %u", note);
+				sprint_note(s, note);
+				show_err("Note out of chord range C2..C6 (36..84) %s (%u)", s, note);
 				errs++;
 			}
 		}else{
@@ -2137,12 +2143,14 @@ static void txt_chord_callback(Fl_Widget* o, void*) {
 				}
 			}
 		}
-// #ifdef _DEBUG		
+#ifdef _DEBUG		
 		printf("Note # %u = %d -> %u\n", i, note, chord_notes[i]);
-// #endif		
+#endif		
 	}
-	hex_dump(chord_notes, CHORD_NOTES);
+	// hex_dump(chord_notes, CHORD_NOTES);
 	current_chord_valid = (errs==0);
+	// Should undo chnges to chord_notes if not valid ??
+	current_chord_changed = true;
 	if(current_chord_valid) send_current_chord();
 }
 
@@ -2154,6 +2162,8 @@ static void txt_tone_name_callback(Fl_Widget* o, void*) {
 			return;
 	}
 	strncpy(tone_name, ((Fl_Input *)o)->value(), TONE_NAME_SIZE);
+	current_tone_changed=true;
+	current_changed=true;
 	send_current_tone(); // No ipr available for name, send apr
 }
 
@@ -2164,6 +2174,8 @@ static void txt_patch_name_callback(Fl_Widget* o, void*) {
 			return;
 	}
 	strncpy(patch_name, ((Fl_Input *)o)->value(), PATCH_NAME_SIZE);
+	current_patch_changed=true;
+	current_changed=true;
 	// send_current_patch(); // No ipr available for name, send apr
 	// However this sets the tone and chord numbers ??
 	// hence need to resend tone and chord as well
@@ -2293,7 +2305,6 @@ int load_sysex_file(const char *filename){
 		printf("Opened %s\n", filename);
 		while(keep_running && errs==0){
 			len=fread(buf, 1, SYSEX_HEADER_SIZE, sysex_file); // Get header
-			// if (len==6 && buf[0]==0xF0 && buf[1]==0x41 && buf[2]==0x35 && buf[4]==0x23){// && buf[6]==0x01){
 			if(len==SYSEX_HEADER_SIZE){
 				if(parse_MKS50_sysex_header(buf, channel, op, level)) errs++;
 				if(errs==0){
@@ -2306,6 +2317,7 @@ int load_sysex_file(const char *filename){
 									printf("Read tone parameters\n");
 									set_tone_parameters_from_apr(buf+7, tone_parameters, tone_name);
 									current_tone_valid=true;
+									current_tone_changed=false;
 								}else{
 									fprintf(stderr,"ERROR: invalid tone parameters\n");
 									errs++;
@@ -2316,7 +2328,9 @@ int load_sysex_file(const char *filename){
 								if(len == PATCH_APR_SIZE-SYSEX_HEADER_SIZE && buf[PATCH_APR_SIZE-1] == 0xF7){
 									printf("Read patch parameters\n");
 									set_patch_parameters_from_apr(buf+7, patch_parameters, patch_name);
+									// printf("loaded current chord %u\n", patch_parameters[11]);
 									current_patch_valid=true;
+									current_patch_changed=false;
 								}else{
 									fprintf(stderr,"ERROR: invalid patch parameters\n");
 									errs++;
@@ -2328,6 +2342,7 @@ int load_sysex_file(const char *filename){
 									printf("Read chord notes\n");
 									set_chord_notes_from_apr(buf+7, chord_notes);
 									current_chord_valid=true;
+									current_chord_changed=false;
 								}else{
 									fprintf(stderr,"ERROR: invalid chord notes\n");
 									errs++;
@@ -2348,8 +2363,8 @@ int load_sysex_file(const char *filename){
 									set_tones_from_chunk(buf, is_tone_bank_b? &tone_bank_b:&tone_bank_a);
 									if(program==60){ // hack - if last chunk, tone number is 60
 										printf("Tone bank %c complete\n", is_tone_bank_b?'B':'A');
-										if (is_tone_bank_b){ tone_bank_b.valid=true; }
-										else{ tone_bank_a.valid=true; }
+										if (is_tone_bank_b){ tone_bank_b.valid=true; tone_bank_b.changed=false;}
+										else{ tone_bank_a.valid=true; tone_bank_a.changed=false;}
 										is_tone_bank_b=!is_tone_bank_b;
 									}
 								}else{
@@ -2365,8 +2380,8 @@ int load_sysex_file(const char *filename){
 									set_patches_from_chunk(buf, is_patch_bank_b? &patch_bank_b:&patch_bank_a);
 									if(program==60){ // hack - if last chunk, patch number is 60
 										printf("Patch bank %c complete\n", is_patch_bank_b?'B':'A');
-										if (is_patch_bank_b){ patch_bank_b.valid=true; }
-										else{ patch_bank_a.valid=true; }
+										if (is_patch_bank_b){ patch_bank_b.valid=true; patch_bank_b.changed=false;}
+										else{ patch_bank_a.valid=true; patch_bank_a.changed=false;}
 										is_patch_bank_b=!is_patch_bank_b;
 									}
 								}else{
@@ -2380,6 +2395,7 @@ int load_sysex_file(const char *filename){
 									printf("Read chords bulk dump, length %u\n", len+SYSEX_HEADER_SIZE);
 									set_chord_memory_from_bld(buf, chord_memory);
 									chord_memory_valid=true;
+									chord_memory_changed=false;
 								}else{
 									fprintf(stderr,"ERROR: invalid chord  bulk dump\n");
 									errs++;
@@ -2414,6 +2430,7 @@ void fc_load_sysex_callback(Fl_File_Chooser *w, void *userdata){
 	int errs=load_sysex_file(w->value());
 	
 	// refresh tables display just in case
+	// ?? use flags to check which really needs a redraw
 	patches_group->redraw();
 	tones_group->redraw();
 	chords_group->redraw();
@@ -2567,9 +2584,7 @@ void set_bld_from_chord_memory(t_byte *buf){
 				// Translate apr format to bld format
 				temp_notes[j]=temp_notes[j]-CHORD_BASE_NOTE+(temp_notes[j]<CHORD_BASE_NOTE?128:0);
 			}
-		// hex_dump(temp_notes, CHORD_NOTES);
 		bytes_to_nibbles(temp_notes, buf+SYSEX_HEADER_SIZE+3+2*CHORD_NOTES*i, CHORD_NOTES);
-		// printf("%02x %02x %02x %02x %02x %02x\n", chord_memory[i][0], chord_memory[i][1], chord_memory[i][2], chord_memory[i][3], chord_memory[i][4], chord_memory[i][5]);
 	}
 	buf[CHORD_BLD_SIZE-1]=0xF7;
 }
@@ -2588,6 +2603,7 @@ void fc_save_chords_callback(Fl_File_Chooser *w, void *userdata){
  	t_byte buf[CHORD_BLD_SIZE];
 	set_bld_from_chord_memory(buf);
 	write_sysex_file(buf, CHORD_BLD_SIZE, w->value(), w->filter_value() == 0);
+	chord_memory_changed=false;
 }
 
 void btn_send_chords_callback(Fl_Widget* o, void*) {
@@ -2611,6 +2627,7 @@ static void btn_save_patch_bank_a_callback(Fl_Widget* o, void*) {
     fc->preview(0);
     fc->callback(fc_save_patch_bank_a_callback);
     fc->show();
+    patch_bank_a.changed=false;
 }
 
 static void btn_save_patch_bank_b_callback(Fl_Widget* o, void*) {
@@ -2623,6 +2640,7 @@ static void btn_save_patch_bank_b_callback(Fl_Widget* o, void*) {
     fc->preview(0);
     fc->callback(fc_save_patch_bank_b_callback);
     fc->show();
+    patch_bank_b.changed=false;
 }
 
 static void btn_save_tone_bank_a_callback(Fl_Widget* o, void*) {
@@ -2635,6 +2653,7 @@ static void btn_save_tone_bank_a_callback(Fl_Widget* o, void*) {
     fc->preview(0);
     fc->callback(fc_save_tone_bank_a_callback);
     fc->show();
+    tone_bank_a.changed=false;
 }
 
 static void btn_save_tone_bank_b_callback(Fl_Widget* o, void*) {
@@ -2647,6 +2666,7 @@ static void btn_save_tone_bank_b_callback(Fl_Widget* o, void*) {
     fc->preview(0);
     fc->callback(fc_save_tone_bank_b_callback);
     fc->show();
+    tone_bank_b.changed=false;
 }
 
 static void btn_save_chords_callback(Fl_Widget* o, void*) {
@@ -2659,6 +2679,65 @@ static void btn_save_chords_callback(Fl_Widget* o, void*) {
     fc->preview(0);
     fc->callback(fc_save_chords_callback);
     fc->show();
+}
+
+static void window_callback (Fl_Widget *widget, void *) 
+{
+// Adapted from https://stackoverflow.com/questions/8131510/fltk-closing-window
+    Fl_Window *window = (Fl_Window *)widget;
+    bool changed=patch_bank_a.changed || patch_bank_b.changed
+		|| tone_bank_a.changed || tone_bank_b.changed
+		|| chord_memory_changed
+		|| current_changed;
+	
+    if(!changed){ window->hide(); return; }
+    
+	// Tell the user exactly what needs to be saved
+    char s[128];
+	char *ptr=s;
+	bool need_comma=false;
+	ptr+=sprintf(ptr, "Changed: ");
+	if (patch_bank_a.changed){
+		ptr+=sprintf(ptr,"patch bank a");
+		need_comma=true;
+	}
+	if (patch_bank_b.changed){
+		if (need_comma) ptr+=sprintf(ptr,", ");
+		ptr+=sprintf(ptr,"patch bank b");
+		need_comma=true;
+	}
+	if (tone_bank_a.changed){
+		if (need_comma) ptr+=sprintf(ptr,", ");
+		ptr+=sprintf(ptr,"tone bank a");
+		need_comma=true;
+	}
+	if (tone_bank_b.changed){
+		if (need_comma) ptr+=sprintf(ptr,", ");
+		ptr+=sprintf(ptr,"tone bank b");
+		need_comma=true;
+	}
+	if (chord_memory_changed){
+		if (need_comma) ptr+=sprintf(ptr,", ");
+		ptr+=sprintf(ptr,"chords");
+		need_comma=true;
+	}
+	if (current_changed){
+		if (need_comma) ptr+=sprintf(ptr,", ");
+		ptr+=sprintf(ptr,"current edit buffer");
+		need_comma=true;
+	}
+
+
+    int result = fl_choice("Quit without saving? All changes will be lost!\n%s", 
+        "Quit anyway",  // 0
+        "Cancel",       // 1
+        0, // No 3rd button
+        s);
+    if (result == 0) // Close without saving
+        window->hide(); // Already hidden ??
+    else
+		window->show();
+    // else don't do anything
 }
 
 // GUI creation helper functions
@@ -2676,6 +2755,7 @@ Fl_Value_Slider *make_value_slider(int x, int y, int w, int h, const char * labe
 	o->callback((Fl_Callback*)parm_callback); // Handles both tone and patch parameters
 	o->slider_size(.04);
 	o->textsize(12);
+	return(o);
 }
 
 Fl_List_Slider *make_list_slider(int x, int y, int w, int h, const char * label, int parm_number, int max_value, const char** names){
@@ -2692,6 +2772,7 @@ Fl_List_Slider *make_list_slider(int x, int y, int w, int h, const char * label,
 	o->callback((Fl_Callback*)parm_callback); // Handles both tone and patch parameters
 	o->slider_size(.04);
 	o->list(names, max_value+1); // Starting from 0
+	return(o);
 }
 
 Fl_Image_List_Slider *make_image_list_slider(int x, int y, int w, int h, const char * label, int parm_number, int max_value, const Fl_RGB_Image ** images){
@@ -2708,6 +2789,7 @@ Fl_Image_List_Slider *make_image_list_slider(int x, int y, int w, int h, const c
 	o->callback((Fl_Callback*)parm_callback); // Handles both tone and patch parameters
 	o->slider_size(.04);
 	o->list(images, max_value+1); // Starting from 0
+	return(o);
 }
 
 // GUI creation
@@ -2780,8 +2862,6 @@ Fl_Double_Window* make_window() {
 
 	main_window = new Fl_Double_Window(ww, hh, "Yet another MKS-50 patch editor");
 	Fl_Tabs* tabs = new Fl_Tabs(0, 0, tw, th, "Parameters");
-	// o->callback((Fl_Callback*)tabCallback);
-	// y+=h+spacing;
 	controls_group = new Fl_Group(spacing, spacing+h, tw, th, "Parameters");
 	x=11*w+12*spacing;
 	x0=x; y0=y;
@@ -2816,20 +2896,18 @@ Fl_Double_Window* make_window() {
 	x += w+spacing; // room for label
 	txt_patch_name = new Fl_Input(x, y, 2*w + spacing, h, "Patch:");
 	txt_patch_name->callback((Fl_Callback*)txt_patch_name_callback);
-	// x += 2*w + spacing;
+	txt_patch_name->tooltip("Up to 10 letters or digits or space or dash");
 	y0=y; x0=x;
 	y+=h+spacing;
-	// x += w+spacing; // room for label
 	txt_tone_name = new Fl_Input(x, y, 2*w + spacing, h, "Tone:");
 	txt_tone_name->callback((Fl_Callback*)txt_tone_name_callback);
+	txt_tone_name->tooltip("Up to 10 letters or digits or space or dash");
 	x += 2*w + spacing;
 	txt_tone_num = new Fl_Output(x, y, w, h);
 	y+=h+spacing; x=x0;
-	// txt_chord=new Fl_Output(x, y, 4*w+3*spacing, h, "Chord:");
 	txt_chord=new Fl_Input(x, y, 4*w+3*spacing, h, "Chord:");
 	txt_chord->callback((Fl_Callback*)txt_chord_callback);
-
-	// txt_chord->align(FL_ALIGN_TOP);
+	txt_chord->tooltip("Up to 6 notes from C2 to C6");
 	y+=h+spacing;
 	y=y0;
 		
@@ -2839,8 +2917,10 @@ Fl_Double_Window* make_window() {
 	make_image_list_slider(x, y, w, 5*h, "DCO\nsub", 5, 5, sub_images_rgb); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "Sub\nlevel", 7, 3); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "Noise\nlevel", 8, 3); x += w + spacing;
-	make_value_slider(x, y, w, 8*h, "Pulse\nwidth", 14, 127); x += w + spacing;
-	make_value_slider(x, y, w, 8*h, "P.mod\nrate", 15, 127); x += w + spacing;
+	Fl_Value_Slider *o = make_value_slider(x, y, w, 8*h, "Pulse\nwidth", 14, 127); x += w + spacing;
+	o->tooltip("Applies only to some waveforms");
+	o=make_value_slider(x, y, w, 8*h, "P.mod\nrate", 15, 127); x += w + spacing;
+	o->tooltip("0 for fixed pulse width");
 	make_value_slider(x, y, w, 5*h, "HPF\nfreq", 9, 3); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nfreq", 16, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nreso", 17, 127); x += w + spacing;
@@ -2851,6 +2931,7 @@ Fl_Double_Window* make_window() {
 	make_value_slider(x, y, w, 8*h, "VCF\nafter", 21, 127); x += w + spacing;
 	make_list_slider(x, y, w, 3*h, "Chorus", 10, 1, on_off_names); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "Chorus\nrate", 34, 127); x += w + spacing;
+
 	x=spacing; y += 9*h + 2*spacing; // New row
 	make_value_slider(x, y, w, 8*h, "VCA\nlevel", 22, 127); x += w + spacing;
 	make_image_list_slider(x, y, w, 4*h, "VCA\nenv\nmode", 2, 3, env_vca_images_rgb); x += w + spacing;
@@ -2879,6 +2960,7 @@ Fl_Double_Window* make_window() {
 	patch_table_a->col_width_all(2*w);
 	patch_table_a->row_height_all(h);
 	patch_table_a->patches(&patch_bank_a);
+	patch_table_a->tooltip("Click on any patch to recall it to the edit buffer and send it to the MKS-50");
 	// patch_table_a->align(FL_ALIGN_LEFT | FL_ALIGN_TOP);
 	// Buttons do not work for some y positions, interfering with label??
 	y+=h*8+2;
@@ -2887,6 +2969,7 @@ Fl_Double_Window* make_window() {
 	patch_table_b->col_width_all(2*w);
 	patch_table_b->row_height_all(h);
 	patch_table_b->patches(&patch_bank_b);
+	patch_table_b->tooltip("Click on any patch to recall it to the edit buffer and send it to the MKS-50");
 	y+=h*8+2+spacing;
 	btn_store_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_patch->callback((Fl_Callback*)btn_store_patch_callback);
@@ -2920,12 +3003,14 @@ Fl_Double_Window* make_window() {
 	tone_table_a->col_width_all(2*w);
 	tone_table_a->row_height_all(h);
 	tone_table_a->tones(&tone_bank_a);
+	tone_table_a->tooltip("Click on any tone to recall it to the edit buffer and send it to the MKS-50");
 	y+=h*8+2;
 	y+=h+spacing; // Room for label
 	tone_table_b=new ToneTable(x, y, 2*w*8+2, h*8+2, "Tone bank B");
 	tone_table_b->col_width_all(2*w);
 	tone_table_b->row_height_all(h);
 	tone_table_b->tones(&tone_bank_b);
+	tone_table_b->tooltip("Click on any tone to recall it to the edit buffer and send it to the MKS-50");
 	y+=h*8+2+spacing;
 	btn_store_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_tone->callback((Fl_Callback*)btn_store_tone_callback);
@@ -2960,12 +3045,14 @@ Fl_Double_Window* make_window() {
 	chord_table_1->col_width(0, 4*w);
 	chord_table_1->row_height_all(h);
 	chord_table_1->offset(0);
+	chord_table_1->tooltip("Click on any chord to recall it to the edit buffer and send it to the MKS-50");
 	x+=w*5+2+spacing;
 	chord_table_2=new ChordTable(x, y, w*5+2, h*8+2);
 	chord_table_2->row_header_width(w);
 	chord_table_2->col_width(0, 4*w);
 	chord_table_2->row_height_all(h);
 	chord_table_2->offset(8);
+	chord_table_2->tooltip("Click on any chord to recall it to the edit buffer and send it to the MKS-50");
 	y+=h*8+2+spacing; x=spacing; // New row
 	btn_store_chord = new Fl_Toggle_Button(x, y, 2*w+spacing, h, "Store");
 	btn_store_chord->tooltip("Will store chord from current edit buffer into next activated chord");
@@ -3028,10 +3115,12 @@ Fl_Double_Window* make_window() {
 int main(int argc, char **argv) {
 
 	Fl_Window* win = make_window();
+	win->callback(window_callback);
 	patch_bank_b.program_offset=64;
 	tone_bank_b.program_offset=64;
 	char *sender_name=0, *dest_name=0;
 	bool dest_ok=false;
+	bool replicate=false;
 	// chord_table_2->offset(8);
 
 	int arg_errs=0;
@@ -3043,7 +3132,7 @@ int main(int argc, char **argv) {
 				arg_errs+=load_sysex_file(argv[i]);
 			}else{
 				// Got an option
-				if (i+1>=argc){
+				if (i+1>=argc && argv[i][1]!='r'){
 					fprintf(stderr, "Option %s requires an argument\n", argv[i]);
 					exit(-1);
 				}
@@ -3056,19 +3145,40 @@ int main(int argc, char **argv) {
 							exit(-1);
 						}
 						midi_channel=c-1;
+						i++;
 						break;
 					case 'i':
 						sender_name=argv[i+1];
+						i++;
 						break;
 					case 'o':
 						dest_name=argv[i+1];
+						i++;
+						break;
+					case 'r':
+						replicate=true;
 						break;
 					default:
 						fprintf(stderr, "Illegal option %s\n", argv[i]);
 						exit(-1);
 				}
-				i++;
 			}	
+		}
+	}
+	
+	printf("current chord %u\n", patch_parameters[11]);
+	if(replicate){
+		if(!current_valid){
+			show_err("Nothing to replicate - please specify patch file");
+		}else{
+			for(int i=0; i<CHORDS; i++) store_chord(i, true);
+			chord_memory_valid=true;
+			for(int i=0; i<PATCHES; i++) store_patch(i, true);
+			patch_bank_a.valid=true;
+			patch_bank_b.valid=true;
+			for(int i=0; i<TONES; i++) store_tone(i, true);
+			tone_bank_a.valid=true;
+			tone_bank_b.valid=true;
 		}
 	}
 	
@@ -3085,13 +3195,15 @@ int main(int argc, char **argv) {
 	snprintf(s_client, 6, "%u:0", client);
 	if(dest_name){
 		if(aconnect(s_client, dest_name))
-			fprintf(stderr, "Connection to %s failed\n", dest_name);
+			show_err("Connection to midi destination %s failed\n"
+			    "Use aconnect -o to show available destinations", dest_name);
 		else
 			dest_ok=true;
 	}
 	if(sender_name){
 		if(aconnect(sender_name, s_client))
-			fprintf(stderr, "Connection from %s failed\n", sender_name);
+			show_err("Connection from midi source %s failed\n"
+			    "Use aconnect -i to show available sources", sender_name);
 	}
 
 	// create the thread and tell it to use Midi::work as thread function
@@ -3102,15 +3214,17 @@ int main(int argc, char **argv) {
 	}
 
 	// Now that midi is ok, try to sync the MKS-50
-	// For this to actually work, we'd need to set channel and connect midi output from command line options
-	// printf("%u %u %u %u\n", dest_ok, auto_send, arg_errs, current_valid);
+	// For this to work, we need to connect to midi output using command line option -o
+	// and possibly set channel
 	if (dest_ok && auto_send && arg_errs==0 && current_valid) send_current();
 
 	// FLTK main loop
 	win->show();
-	return Fl::run();
+	Fl::run();
 	// wait for the midi thread to shutdown carefully
 	pthread_cancel(midithread);
 	// release Alsa Midi connection
 	snd_seq_close(seq_handle);
+	
+	printf("Bye!\n");
 }
