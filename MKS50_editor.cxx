@@ -9,13 +9,9 @@
 /* TODO
  * controls for all 13 patch parameters
  * make sure changed flag is updated properly for recall, rename, store, load, save
- * dynamic tooltips for the 6 tables: load when not valid, recall if valid
- *   probably needs 3 set_ and 3 clear_ xxxx valid functions
  * warn about handshake not supported
  * buttons copy and paste for tables (single button changes from copy to paste?)
  * is 0 patch and tone acceptable as valid, in banks and in current? (chords are not)
- * indicate what waveshapes respond to pulse width (gray pw controls?)
- *   requires special callback for wave shapes
  */
 
 #include "MKS50_editor.h"
@@ -153,6 +149,13 @@ Fl_Input *txt_midi_channel=(Fl_Input *)0;
 Fl_Input *txt_test_note=(Fl_Input *)0;
 Fl_Input *txt_test_vel=(Fl_Input *)0;
 Fl_Toggle_Button *btn_store_chord=(Fl_Toggle_Button *)0;
+Fl_Value_Slider *vs_pulse_width=(Fl_Value_Slider *)0;
+Fl_Value_Slider *vs_pulse_mod_rate=(Fl_Value_Slider *)0;
+Fl_Value_Slider *vs_chorus_rate=(Fl_Value_Slider *)0;
+Fl_Value_Slider *vs_porta_time=(Fl_Value_Slider *)0;
+Fl_Input *txt_key_low=(Fl_Input *)0;
+Fl_Input *txt_key_high=(Fl_Input *)0;
+Fl_Int_Input *txt_key_shift=(Fl_Int_Input *)0;
 
 ////////////////////
 // Misc utilities //
@@ -757,17 +760,49 @@ int sprint_chord(char *s, const t_byte * chord){
 	return(s0-s);
 }
 
+void redraw_wave_parameter(){
+	if (tone_parameters[3]==3 || tone_parameters[4]==3){ // These wave shapes allow PWM
+		vs_pulse_width->color(FL_BACKGROUND_COLOR);
+		vs_pulse_width->textcolor(FL_FOREGROUND_COLOR);
+		vs_pulse_mod_rate->color(FL_BACKGROUND_COLOR);
+		vs_pulse_mod_rate->textcolor(FL_FOREGROUND_COLOR);
+	}else{ // PWM control has no effect
+		vs_pulse_width->color(FL_DARK1);
+		vs_pulse_width->textcolor(FL_DARK3);
+		vs_pulse_mod_rate->color(FL_DARK1);
+		vs_pulse_mod_rate->textcolor(FL_DARK3);
+	}
+	vs_pulse_width->redraw();
+	vs_pulse_mod_rate->redraw();
+}
+
+void redraw_chorus_parameter(){
+	if (tone_parameters[10]){ // Chorus on
+		vs_chorus_rate->color(FL_BACKGROUND_COLOR);
+		vs_chorus_rate->textcolor(FL_FOREGROUND_COLOR);
+	}else{ // Chorus off
+		vs_chorus_rate->color(FL_DARK1);
+		vs_chorus_rate->textcolor(FL_DARK3);
+	}
+	vs_chorus_rate->redraw();
+}
+
 void redraw_tone_parameters(){
 //	Fl::lock();
 	for (int i=0; i < TONE_PARMS; i++){
 		if (tone_controls[i]){
 			tone_controls[i]->value(tone_parameters[i]);
+			// PW and PWM need color change TODO ??
 			tone_controls[i]->redraw();
 #ifdef _DEBUG											
 			printf("Redraw tone parameter #%u\n", i);
 #endif											
 		}
 	}
+	// The following parameters require special drawing
+	redraw_wave_parameter();
+	redraw_chorus_parameter();
+
 	if(txt_tone_name){
 		txt_tone_name->value(tone_name);
 		txt_tone_name->redraw();
@@ -783,7 +818,7 @@ void redraw_tone_parameters(){
 }
 
 void set_tone_parameters_from_apr(const t_byte *buf, t_byte *tone_parameters, char *tone_name){
-	// Translate apr to tone data and display (should separate??)
+	// Translate apr to tone data and display
 	// buf points to sysex APR data, past 7 bytes sysex header
 	for (int i=0; i < TONE_PARMS; i++){
 		tone_parameters[i]=buf[i];
@@ -793,6 +828,54 @@ void set_tone_parameters_from_apr(const t_byte *buf, t_byte *tone_parameters, ch
 	tone_name[TONE_NAME_SIZE]=0;
 	printf("Got all tone parameters for %s\n", tone_name);
 	redraw_tone_parameters();
+}
+
+void redraw_keymode_parameter(){
+	if(patch_parameters[12]==1){ // Key mode is "chord"
+		((Fl_Value_Slider *)patch_controls[11])->color(FL_BACKGROUND_COLOR);
+		((Fl_Value_Slider *)patch_controls[11])->textcolor(FL_FOREGROUND_COLOR);
+	}else{
+		((Fl_Value_Slider *)patch_controls[11])->color(FL_DARK1);
+		((Fl_Value_Slider *)patch_controls[11])->textcolor(FL_DARK3);
+	}
+	patch_controls[11]->redraw();
+}
+
+void redraw_porta_switch_parameter(){
+	if(patch_parameters[4]==1){ // Portamento on
+		vs_porta_time->color(FL_BACKGROUND_COLOR);
+		vs_porta_time->textcolor(FL_FOREGROUND_COLOR);
+	}else{ // Portamento off
+		vs_porta_time->color(FL_DARK1);
+		vs_porta_time->textcolor(FL_DARK3);
+	}
+	vs_porta_time->redraw();
+}
+
+void redraw_note_parameter(Fl_Widget* o, t_byte note){
+//	Fl::lock();
+	if(txt_chord){
+		static char s[5];
+		sprint_note(s, note);
+		((Fl_Input*)o)->value(s);
+		o->redraw();
+	}
+	Fl::awake();
+//	Fl::unlock();
+}
+
+void redraw_key_shift_parameter(){
+//	Fl::lock();
+	if(txt_key_shift){
+		static char s[5];
+		int v=patch_parameters[6];
+		if(v>0x3F) v-=0x80;
+		sprintf(s, "%i", v);
+		txt_key_shift->value(s);
+		txt_key_shift->redraw();
+	}
+	Fl::awake();
+//	Fl::unlock();
 }
 
 void redraw_patch_parameters(){
@@ -808,11 +891,18 @@ void redraw_patch_parameters(){
 #endif											
 		}
 	}
+	// The following parameters require special drawing
+	redraw_keymode_parameter();	// chord memory needs color update
+	redraw_porta_switch_parameter(); // porta time needs color update
+	redraw_note_parameter(txt_key_low, patch_parameters[1]);
+	redraw_note_parameter(txt_key_high, patch_parameters[2]);
+	redraw_key_shift_parameter();
+	
 	if(txt_patch_name){
 		txt_patch_name->value(patch_name);
 		txt_patch_name->redraw();
 #ifdef _DEBUG											
-			printf("Redraw patch name \"%s\"\n", patch_name);
+		printf("Redraw patch name \"%s\"\n", patch_name);
 #endif											
 	}
 	if(txt_chord && chord_memory_valid){
@@ -822,7 +912,7 @@ void redraw_patch_parameters(){
 		txt_chord->value(s);
 		txt_chord->redraw();
 #ifdef _DEBUG											
-			printf("Redraw chord \"%s\"\n", s);
+		printf("Redraw chord \"%s\"\n", s);
 #endif											
 	}
 	Fl::awake();
@@ -889,405 +979,6 @@ int parse_MKS50_sysex_header(const t_byte *sysex, int &channel, int &op, int &le
 	level=sysex[5];
 	return(0);
 }
-
-////////////////////////////
-// MIDI related functions //
-////////////////////////////
-
-// Some messages can be split over two events (not more with MKS-50)
-// Therefore we need an extra buffer that survives alsa_midi_process calls
-t_byte bulk_buffer[PATCH_BLD_SIZE>TONE_BLD_SIZE?PATCH_BLD_SIZE:TONE_BLD_SIZE];
-t_byte bulk_chord_buffer[CHORD_BLD_SIZE];
-t_byte *bulk_ptr;
-static bool bulk_pending=false; // true when a bulk dump spans several events
-static bool is_tone_bank_b=false;
-static bool is_patch_bank_b=false;
-
-snd_seq_t *open_seq() {
-  snd_seq_t *seq_handle;
-  if (snd_seq_open(&seq_handle, "hw", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
-	fprintf(stderr, "Error opening ALSA sequencer.\n");
-	exit(1);
-  }
-  snd_seq_set_client_name(seq_handle, midiName);
-  if ((portid = snd_seq_create_simple_port(seq_handle, midiName,
-			SND_SEQ_PORT_CAP_READ|SND_SEQ_PORT_CAP_SUBS_READ|
-			SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,
-			SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
-	fprintf(stderr, "Error creating sequencer port.\n");
-	exit(1);
-  }
-  return(seq_handle);
-}
-
-int aconnect(char *sender_name, char *dest_name)
-{
-	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
-	int queue = 0, convert_time = 0, convert_real = 0, exclusive = 0;
-
-	snd_seq_t *seq;
-	int list_perm = 0;
-	int client;
-	int list_subs = 0;
-	snd_seq_port_subscribe_t *subs;
-	snd_seq_addr_t sender, dest;
-
-	if (snd_seq_open(&seq, "default", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
-		fprintf(stderr, "can't open sequencer\n");
-		return 1;
-	}
-	
-	/* connection or disconnection */
-
-	if ((client = snd_seq_client_id(seq)) < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "can't get client id\n");
-		return 1;
-	}
-
-	/* set client info */
-	if (snd_seq_set_client_name(seq, "ALSA Connector") < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "can't set client info\n");
-		return 1;
-	}
-
-	/* set subscription */
-	if (snd_seq_parse_address(seq, &sender, sender_name) < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "invalid sender address %s\n", sender_name);
-		return 1;
-	}
-	if (snd_seq_parse_address(seq, &dest, dest_name) < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "invalid destination address %s\n", dest_name);
-		return 1;
-	}
-	snd_seq_port_subscribe_alloca(&subs);
-	snd_seq_port_subscribe_set_sender(subs, &sender);
-	snd_seq_port_subscribe_set_dest(subs, &dest);
-	snd_seq_port_subscribe_set_queue(subs, queue);
-	snd_seq_port_subscribe_set_exclusive(subs, exclusive);
-	snd_seq_port_subscribe_set_time_update(subs, convert_time);
-	snd_seq_port_subscribe_set_time_real(subs, convert_real);
-
-	if (snd_seq_get_port_subscription(seq, subs) == 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "Connection is already subscribed\n");
-		return 1;
-	}
-	if (snd_seq_subscribe_port(seq, subs) < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "Connection failed (%s)\n", snd_strerror(errno));
-		return 1;
-	}
-
-	snd_seq_close(seq);
-
-	return 0;
-}
-
-
-void all_notes_off(int channel){
-	snd_seq_event_t ev;
-	snd_seq_ev_clear(&ev);
-	snd_seq_ev_set_source(&ev, portid); 
-	snd_seq_ev_set_subs(&ev);
-	snd_seq_ev_set_direct(&ev);
-	ev.queue = SND_SEQ_QUEUE_DIRECT; // maybe redundant
-	
-    ev.type=SND_SEQ_EVENT_CONTROLLER;
-	ev.data.control.channel=channel;
-	ev.data.control.param=123;
-	ev.data.control.value=0;
-	
-	snd_seq_event_output_direct(seq_handle, &ev);
-}
-
-static int send_sysex(t_byte * sysex, const unsigned int len){
-#ifdef _DEBUG		
-	// Hex dump of sysex contents
-	for (int i=0; i < len; i++)
-		printf("%02x ", sysex[i]);
-	printf("\n");		
-#endif			
-	snd_seq_event_t ev;
-	snd_seq_ev_clear(&ev);
-	snd_seq_ev_set_source(&ev, portid); 
-	snd_seq_ev_set_subs(&ev);
-	snd_seq_ev_set_direct(&ev);
-	ev.queue = SND_SEQ_QUEUE_DIRECT; // Possibly redundant
-	ev.flags |= SND_SEQ_EVENT_LENGTH_VARIABLE; // Mandatory !!
-	ev.type = SND_SEQ_EVENT_SYSEX;
-	int status, remaining=len;
-	// Send buffer one chunk at a time, with throttling
-	// It seems the MKS-50 cannot cope when sending all at once
-	int chunk=266;
-	// chunk 256 or 266 usleep 1000000 ok
-	// chunk 266 usleep 100000 ok
-	while (remaining>chunk){
-		ev.data.ext.len = chunk;
-		ev.data.ext.ptr = sysex;	
-		// printf("sysex %02x..%02x\n", sysex[0], sysex[chunk-1]);
-		status = snd_seq_event_output_direct(seq_handle, &ev);
-		sysex+=chunk;
-		remaining -=chunk;
-		usleep(10000); // 10000 ok for MKS-50
-	}
-	if(remaining){
-		ev.data.ext.len = remaining;
-		ev.data.ext.ptr = sysex;	
-		status = snd_seq_event_output_direct(seq_handle, &ev);
-	}
-#ifdef _DEBUG		
-	printf("send_sysex: Output status %i (len %u)\n", status, len);
-	// status=len+28 ?? 202 -> 230, 4256 -> 4284
-	// we do get 202 and 4256 in kmidimon
-#endif
-	return(status);
-}
-
-static void send_current_tone(){
-	// Sends current tone over MIDI
-	t_byte buf[TONE_APR_SIZE];
-	if(current_tone_valid){
-		set_apr_from_tone_parameters(tone_parameters, tone_name, buf);
-		send_sysex(buf,TONE_APR_SIZE);
-		printf("Sent current tone\n");
-	}else{
-		fprintf(stderr, "No tone parameters, cannot send\n");
-	}
-}
-
-static void send_current_chord(){
-	// Sends current chord over MIDI
-	t_byte buf[CHORD_APR_SIZE];
-	if(current_chord_valid){
-		set_apr_from_chord_notes(chord_notes, buf);
-		send_sysex(buf,CHORD_APR_SIZE);
-		printf("Sent current chord\n");
-	}else{
-		fprintf(stderr, "No chord notes, cannot send\n");
-	}
-}
-
-static void send_current_patch(){
-	// Sends current chord over MIDI
-	t_byte buf[PATCH_APR_SIZE];
-	if(current_patch_valid){
-		set_apr_from_patch_parameters(patch_parameters, patch_name, buf);
-		send_sysex(buf, PATCH_APR_SIZE);
-		printf("Sent current patch\n");
-	}else{
-		fprintf(stderr, "No patch parameters, cannot send\n");
-	}
-}
-
-static void send_current(){
-	// Sends current edit buffer contents (patch, tone and chord) over MIDI
-	send_current_patch();
-	send_current_tone();
-	send_current_chord();
-}
-
-int recall_chord(unsigned int chord_num){
-	// Implicit destination is edit buffer
-	// always chord_notes in this case
-		
-	if(!chord_memory_valid){
-		fprintf(stderr, "ERROR: chord data not set\n");
-		return(-1);
-	}
-	if (chord_num > CHORDS){
-		fprintf(stderr, "ERROR: illegal chord number %u\n", chord_num);
-		return(-1);
-	}
-	printf("Recalling from chord #%u\n", chord_num);
-
-	memcpy(chord_notes, chord_memory[chord_num], CHORD_NOTES);
-
-	redraw_chord_notes();
-
-	current_chord_valid=true;
-	current_chord_changed=false;
-	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
-	chord_from_apr=false;
-	current_valid=current_patch_valid && current_chord_valid && current_chord_valid;
-	if (auto_send) send_current_chord();
-
-// Should we set chord number in patch parameters ??
-
-	return(0);
-}
-
-int recall_tone(unsigned int tone_num){
-	// Implicit destination is edit buffer
-	Tone_bank *tone_bank;
-	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
-		
-	if(!tone_bank->valid){
-		fprintf(stderr, "ERROR: tone data not set\n");
-		return(-1);
-	}
-	
-	int tone=tone_num & 0x3F;
-	printf("Recalling from tone #%u \"%s\"\n", tone_num, tone_bank->names[tone]);
-
-	memcpy(tone_parameters, tone_bank->parameters[tone], TONE_PARMS);
-	memcpy(tone_name, tone_bank->names[tone], TONE_NAME_SIZE+1);
-	patch_parameters[0]=tone_num;
-	
-	redraw_tone_parameters();
-
-	current_tone_valid=true;
-	current_tone_changed=false;
-	current_valid=current_patch_valid && current_tone_valid && current_chord_valid;
-	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
-
-	if (auto_send) send_current_tone();
-
-	return(0);
-}
-
-int recall_patch(unsigned int patch_num){
-	// Implicit destination is edit buffer
-	Patch_bank *patch_bank;
-	Tone_bank *tone_bank;
-
-	if(patch_num>PATCHES){
-		fprintf(stderr, "ERROR: illegal patch number %u\n", patch_num);
-		return(-1);
-	}
-
-	patch_bank=patch_num>63 ? &patch_bank_b : &patch_bank_a;
-	// Always the same bank for tone and patch ??
-	// tone_bank=patch_num>63 ? &tone_bank_b : &tone_bank_a;
-		
-	if(!patch_bank->valid || !chord_memory_valid){
-		fprintf(stderr, "ERROR: patch or chord data not set\n");
-		// fprintf(stderr, "PA %u PB %u TA %u TB %u CM %u\n", patch_bank_a.valid, patch_bank_b.valid, tone_bank_a.valid, tone_bank_b.valid, chord_memory_valid);
-		return(-1); // ?? proceed anyway, load what's available
-	}
-	
-	int program, tone_num, tone, chord;
-	program=patch_num & 0x3F;
-	tone_num=patch_bank->parameters[program][0];
-	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
-	tone=tone_num & 0x3F;
-	if(!tone_bank->valid){
-		fprintf(stderr, "ERROR: tone data not set\n");
-		return(-1); // ?? proceed anyway, load what's available
-	}
-	chord=patch_bank->parameters[program][11];
-	printf("Recalling from patch #%u \"%s\"\n", patch_num, patch_bank->names[program]);
-	printf("Recalling tone #%u \"%s\", chord #%u\n", tone_num, tone_bank->names[tone], chord);
-
-	memcpy(patch_parameters, patch_bank->parameters[program], PATCH_PARMS);
-	memcpy(patch_name, patch_bank->names[program], PATCH_NAME_SIZE+1);
-	current_patch_valid=true;
-	current_patch_changed=false;
-	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
-	redraw_patch_parameters();
-	
-	recall_tone(tone_num);
-	recall_chord(chord);
-	
-	current_valid=true;
-	if (auto_send) send_current();
-
-	return(0);
-}
-
-int store_patch(unsigned int patch_num, bool forced){
-	// Implicit source is edit buffer
-	// Destination includes patch, tone and chord
-	// Destination is in bank b for patch numbers above 63
-	Patch_bank *patch_bank;
-	Tone_bank *tone_bank;
-	patch_bank=patch_num>63 ? &patch_bank_b : &patch_bank_a;
-	// Not always the same bank for tone and patch
-	// tone_bank=patch_num>63 ? &tone_bank_b : &tone_bank_a;
-
-    // Don't allow setting a patch when the bank has not been init'ed
-    // This would create a partly valid bank
-	if(!forced &&(!patch_bank->valid || !chord_memory_valid)){
-		fprintf(stderr,"ERROR: patch or chord data not set\n");
-		return(-1); // ?? store whatever is available anyway
-	}
-	if(patch_num>=PATCHES){
-		fprintf(stderr,"ERROR: illegal patch number %u\n", patch_num);
-		return(-1);
-	}
-
-	int program, tone, chord;
-	program=patch_num & 0x3F;
-	tone=forced?patch_num:patch_parameters[0];
-	patch_parameters[0]=tone;
-	tone_bank=tone>63 ? &tone_bank_b : &tone_bank_a;
-	chord=patch_parameters[11];
-	
-	if (!forced && !tone_bank->valid){
-		fprintf(stderr,"ERROR: tone data not set\n");
-		return(-1);
-	}
-
-	printf("Storing to patch #%u, tone #%u, chord #%u\n", patch_num, tone, chord);
-
-	memcpy(patch_bank->parameters[program], patch_parameters, PATCH_PARMS);
-	memcpy(patch_bank->names[program], patch_name, PATCH_NAME_SIZE+1);
-	patch_bank->changed=true;
-	if (tone_bank->valid){
-		memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
-		memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
-		tone_bank->changed=true;
-	}
-	if (chord_memory_valid){
-		memcpy(chord_memory[chord], chord_notes, CHORD_NOTES);
-		chord_memory_changed=true;
-	}
-	
-	return(0);
-}
-
-int store_tone(unsigned int tone_num, bool forced){
-	// Implicit source is edit buffer
-	Tone_bank *tone_bank;
-	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
-
-    // Don't allow setting a tone when the bank has not been init'ed
-    // This would create a partly valid bank
-	if(!forced &&(!tone_bank->valid || !current_tone_valid)){
-		fprintf(stderr,"ERROR: tone data not set\n");
-		return(-1);
-	}
-	if(tone_num<0 or tone_num>=TONES){
-		fprintf(stderr,"ERROR: illegal tone number %u\n", tone_num);
-		return(-1);
-	}
-	
-	int tone;
-	tone=tone_num & 0x3F;
-
-	printf("Storing to tone #%u\n", tone_num);
-
-	// Update current patch and gui to reflect new tone number
-	patch_parameters[0]=tone_num;
-	current_patch_changed=true;
-	current_changed=true;
-	if(txt_tone_num){
-		char s[4];
-		sprintf(s, "%u", tone_num);
-		txt_tone_num->value(s);
-		txt_tone_num->redraw();
-	}
-	tone_bank->changed=true;
-	
-	memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
-	memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
-	
-	return(0);
-}
-
 
 ////////////////////////////
 // User interface classes //
@@ -1712,6 +1403,409 @@ void ChordTable::draw_cell(TableContext context,
     }
 }
 
+void set_chord_memory_valid(bool b);
+void set_tone_bank_valid(bool b, Tone_bank &tone_bank, Fl_Widget* tone_table);
+void set_patch_bank_valid(bool b, Patch_bank &patch_bank, Fl_Widget* patch_table);
+
+////////////////////////////
+// MIDI related functions //
+////////////////////////////
+
+// Some messages can be split over two events (not more with MKS-50)
+// Therefore we need an extra buffer that survives alsa_midi_process calls
+t_byte bulk_buffer[PATCH_BLD_SIZE>TONE_BLD_SIZE?PATCH_BLD_SIZE:TONE_BLD_SIZE];
+t_byte bulk_chord_buffer[CHORD_BLD_SIZE];
+t_byte *bulk_ptr;
+static bool bulk_pending=false; // true when a bulk dump spans several events
+static bool is_tone_bank_b=false;
+static bool is_patch_bank_b=false;
+
+snd_seq_t *open_seq() {
+  snd_seq_t *seq_handle;
+  if (snd_seq_open(&seq_handle, "hw", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
+	fprintf(stderr, "Error opening ALSA sequencer.\n");
+	exit(1);
+  }
+  snd_seq_set_client_name(seq_handle, midiName);
+  if ((portid = snd_seq_create_simple_port(seq_handle, midiName,
+			SND_SEQ_PORT_CAP_READ|SND_SEQ_PORT_CAP_SUBS_READ|
+			SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,
+			SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
+	fprintf(stderr, "Error creating sequencer port.\n");
+	exit(1);
+  }
+  return(seq_handle);
+}
+
+int aconnect(char *sender_name, char *dest_name)
+{
+	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
+	int queue = 0, convert_time = 0, convert_real = 0, exclusive = 0;
+
+	snd_seq_t *seq;
+	int list_perm = 0;
+	int client;
+	int list_subs = 0;
+	snd_seq_port_subscribe_t *subs;
+	snd_seq_addr_t sender, dest;
+
+	if (snd_seq_open(&seq, "default", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
+		fprintf(stderr, "can't open sequencer\n");
+		return 1;
+	}
+	
+	/* connection or disconnection */
+
+	if ((client = snd_seq_client_id(seq)) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "can't get client id\n");
+		return 1;
+	}
+
+	/* set client info */
+	if (snd_seq_set_client_name(seq, "ALSA Connector") < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "can't set client info\n");
+		return 1;
+	}
+
+	/* set subscription */
+	if (snd_seq_parse_address(seq, &sender, sender_name) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "invalid sender address %s\n", sender_name);
+		return 1;
+	}
+	if (snd_seq_parse_address(seq, &dest, dest_name) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "invalid destination address %s\n", dest_name);
+		return 1;
+	}
+	snd_seq_port_subscribe_alloca(&subs);
+	snd_seq_port_subscribe_set_sender(subs, &sender);
+	snd_seq_port_subscribe_set_dest(subs, &dest);
+	snd_seq_port_subscribe_set_queue(subs, queue);
+	snd_seq_port_subscribe_set_exclusive(subs, exclusive);
+	snd_seq_port_subscribe_set_time_update(subs, convert_time);
+	snd_seq_port_subscribe_set_time_real(subs, convert_real);
+
+	if (snd_seq_get_port_subscription(seq, subs) == 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "Connection is already subscribed\n");
+		return 1;
+	}
+	if (snd_seq_subscribe_port(seq, subs) < 0) {
+		snd_seq_close(seq);
+		fprintf(stderr, "Connection failed (%s)\n", snd_strerror(errno));
+		return 1;
+	}
+
+	snd_seq_close(seq);
+
+	return 0;
+}
+
+
+void all_notes_off(int channel){
+	snd_seq_event_t ev;
+	snd_seq_ev_clear(&ev);
+	snd_seq_ev_set_source(&ev, portid); 
+	snd_seq_ev_set_subs(&ev);
+	snd_seq_ev_set_direct(&ev);
+	ev.queue = SND_SEQ_QUEUE_DIRECT; // maybe redundant
+	
+    ev.type=SND_SEQ_EVENT_CONTROLLER;
+	ev.data.control.channel=channel;
+	ev.data.control.param=123;
+	ev.data.control.value=0;
+	
+	snd_seq_event_output_direct(seq_handle, &ev);
+}
+
+static int send_sysex(t_byte * sysex, const unsigned int len){
+#ifdef _DEBUG		
+	// Hex dump of sysex contents
+	for (int i=0; i < len; i++)
+		printf("%02x ", sysex[i]);
+	printf("\n");		
+#endif			
+	snd_seq_event_t ev;
+	snd_seq_ev_clear(&ev);
+	snd_seq_ev_set_source(&ev, portid); 
+	snd_seq_ev_set_subs(&ev);
+	snd_seq_ev_set_direct(&ev);
+	ev.queue = SND_SEQ_QUEUE_DIRECT; // Possibly redundant
+	ev.flags |= SND_SEQ_EVENT_LENGTH_VARIABLE; // Mandatory !!
+	ev.type = SND_SEQ_EVENT_SYSEX;
+	int status, remaining=len;
+	// Send buffer one chunk at a time, with throttling
+	// It seems the MKS-50 cannot cope when sending all at once
+	int chunk=266;
+	// chunk 256 or 266 usleep 1000000 ok
+	// chunk 266 usleep 100000 ok
+	while (remaining>chunk){
+		ev.data.ext.len = chunk;
+		ev.data.ext.ptr = sysex;	
+		// printf("sysex %02x..%02x\n", sysex[0], sysex[chunk-1]);
+		status = snd_seq_event_output_direct(seq_handle, &ev);
+		sysex+=chunk;
+		remaining -=chunk;
+		usleep(10000); // 10000 ok for MKS-50
+	}
+	if(remaining){
+		ev.data.ext.len = remaining;
+		ev.data.ext.ptr = sysex;	
+		status = snd_seq_event_output_direct(seq_handle, &ev);
+	}
+#ifdef _DEBUG		
+	printf("send_sysex: Output status %i (len %u)\n", status, len);
+	// status=len+28 ?? 202 -> 230, 4256 -> 4284
+	// we do get 202 and 4256 in kmidimon
+#endif
+	return(status);
+}
+
+static void send_current_tone(){
+	// Sends current tone over MIDI
+	t_byte buf[TONE_APR_SIZE];
+	if(current_tone_valid){
+		set_apr_from_tone_parameters(tone_parameters, tone_name, buf);
+		send_sysex(buf,TONE_APR_SIZE);
+		printf("Sent current tone\n");
+	}else{
+		fprintf(stderr, "No tone parameters, cannot send\n");
+	}
+}
+
+static void send_current_chord(){
+	// Sends current chord over MIDI
+	t_byte buf[CHORD_APR_SIZE];
+	if(current_chord_valid){
+		set_apr_from_chord_notes(chord_notes, buf);
+		send_sysex(buf,CHORD_APR_SIZE);
+		printf("Sent current chord\n");
+	}else{
+		fprintf(stderr, "No chord notes, cannot send\n");
+	}
+}
+
+static void send_current_patch(){
+	// Sends current chord over MIDI
+	t_byte buf[PATCH_APR_SIZE];
+	if(current_patch_valid){
+		set_apr_from_patch_parameters(patch_parameters, patch_name, buf);
+		send_sysex(buf, PATCH_APR_SIZE);
+		printf("Sent current patch\n");
+	}else{
+		fprintf(stderr, "No patch parameters, cannot send\n");
+	}
+}
+
+static void send_current(){
+	// Sends current edit buffer contents (patch, tone and chord) over MIDI
+	send_current_patch();
+	send_current_tone();
+	send_current_chord();
+}
+
+int recall_chord(unsigned int chord_num){
+	// Implicit destination is edit buffer
+	// always chord_notes in this case
+		
+	if(!chord_memory_valid){
+		fprintf(stderr, "ERROR: chord data not set\n");
+		return(-1);
+	}
+	if (chord_num > CHORDS){
+		fprintf(stderr, "ERROR: illegal chord number %u\n", chord_num);
+		return(-1);
+	}
+	printf("Recalling from chord #%u\n", chord_num);
+
+	memcpy(chord_notes, chord_memory[chord_num], CHORD_NOTES);
+
+	redraw_chord_notes();
+
+	current_chord_valid=true;
+	current_chord_changed=false;
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
+	chord_from_apr=false;
+	current_valid=current_patch_valid && current_chord_valid && current_chord_valid;
+	if (auto_send) send_current_chord();
+
+// Should we set chord number in patch parameters ??
+
+	return(0);
+}
+
+int recall_tone(unsigned int tone_num){
+	// Implicit destination is edit buffer
+	Tone_bank *tone_bank;
+	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
+		
+	if(!tone_bank->valid){
+		fprintf(stderr, "ERROR: tone data not set\n");
+		return(-1);
+	}
+	
+	int tone=tone_num & 0x3F;
+	printf("Recalling from tone #%u \"%s\"\n", tone_num, tone_bank->names[tone]);
+
+	memcpy(tone_parameters, tone_bank->parameters[tone], TONE_PARMS);
+	memcpy(tone_name, tone_bank->names[tone], TONE_NAME_SIZE+1);
+	patch_parameters[0]=tone_num;
+	
+	redraw_tone_parameters();
+
+	current_tone_valid=true;
+	current_tone_changed=false;
+	current_valid=current_patch_valid && current_tone_valid && current_chord_valid;
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
+
+	if (auto_send) send_current_tone();
+
+	return(0);
+}
+
+int recall_patch(unsigned int patch_num){
+	// Implicit destination is edit buffer
+	Patch_bank *patch_bank;
+	Tone_bank *tone_bank;
+
+	if(patch_num>PATCHES){
+		fprintf(stderr, "ERROR: illegal patch number %u\n", patch_num);
+		return(-1);
+	}
+
+	patch_bank=patch_num>63 ? &patch_bank_b : &patch_bank_a;
+	// Always the same bank for tone and patch ??
+	// tone_bank=patch_num>63 ? &tone_bank_b : &tone_bank_a;
+		
+	if(!patch_bank->valid || !chord_memory_valid){
+		fprintf(stderr, "ERROR: patch or chord data not set\n");
+		// fprintf(stderr, "PA %u PB %u TA %u TB %u CM %u\n", patch_bank_a.valid, patch_bank_b.valid, tone_bank_a.valid, tone_bank_b.valid, chord_memory_valid);
+		return(-1); // ?? proceed anyway, load what's available
+	}
+	
+	int program, tone_num, tone, chord;
+	program=patch_num & 0x3F;
+	tone_num=patch_bank->parameters[program][0];
+	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
+	tone=tone_num & 0x3F;
+	if(!tone_bank->valid){
+		fprintf(stderr, "ERROR: tone data not set\n");
+		return(-1); // ?? proceed anyway, load what's available
+	}
+	chord=patch_bank->parameters[program][11];
+	printf("Recalling from patch #%u \"%s\"\n", patch_num, patch_bank->names[program]);
+	printf("Recalling tone #%u \"%s\", chord #%u\n", tone_num, tone_bank->names[tone], chord);
+
+	memcpy(patch_parameters, patch_bank->parameters[program], PATCH_PARMS);
+	memcpy(patch_name, patch_bank->names[program], PATCH_NAME_SIZE+1);
+	current_patch_valid=true;
+	current_patch_changed=false;
+	send_current_patch();
+	current_changed=current_patch_changed || current_chord_changed || current_chord_changed;
+	redraw_patch_parameters();
+	
+	recall_tone(tone_num);
+	recall_chord(chord);
+	
+	current_valid=true;
+	// if (auto_send) send_current();
+
+	return(0);
+}
+
+int store_patch(unsigned int patch_num, bool forced){
+	// Implicit source is edit buffer
+	// Destination includes patch, tone and chord
+	// Destination is in bank b for patch numbers above 63
+	Patch_bank *patch_bank;
+	Tone_bank *tone_bank;
+	patch_bank=patch_num>63 ? &patch_bank_b : &patch_bank_a;
+	// Not always the same bank for tone and patch
+	// tone_bank=patch_num>63 ? &tone_bank_b : &tone_bank_a;
+
+    // Don't allow setting a patch when the bank has not been init'ed
+    // This would create a partly valid bank
+	if(!forced &&(!patch_bank->valid || !chord_memory_valid)){
+		fprintf(stderr,"ERROR: patch or chord data not set\n");
+		return(-1); // ?? store whatever is available anyway
+	}
+	if(patch_num>=PATCHES){
+		fprintf(stderr,"ERROR: illegal patch number %u\n", patch_num);
+		return(-1);
+	}
+
+	int program, tone, chord;
+	program=patch_num & 0x3F;
+	tone=forced?patch_num:patch_parameters[0];
+	patch_parameters[0]=tone;
+	tone_bank=tone>63 ? &tone_bank_b : &tone_bank_a;
+	chord=patch_parameters[11];
+	
+	if (!forced && !tone_bank->valid){
+		fprintf(stderr,"ERROR: tone data not set\n");
+		return(-1);
+	}
+
+	printf("Storing to patch #%u, tone #%u, chord #%u\n", patch_num, tone, chord);
+
+	memcpy(patch_bank->parameters[program], patch_parameters, PATCH_PARMS);
+	memcpy(patch_bank->names[program], patch_name, PATCH_NAME_SIZE+1);
+	patch_bank->changed=true;
+	if (tone_bank->valid){
+		memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
+		memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
+		tone_bank->changed=true;
+	}
+	if (chord_memory_valid){
+		memcpy(chord_memory[chord], chord_notes, CHORD_NOTES);
+		chord_memory_changed=true;
+	}
+	
+	return(0);
+}
+
+int store_tone(unsigned int tone_num, bool forced){
+	// Implicit source is edit buffer
+	Tone_bank *tone_bank;
+	tone_bank=tone_num>63 ? &tone_bank_b : &tone_bank_a;
+
+    // Don't allow setting a tone when the bank has not been init'ed
+    // This would create a partly valid bank
+	if(!forced &&(!tone_bank->valid || !current_tone_valid)){
+		fprintf(stderr,"ERROR: tone data not set\n");
+		return(-1);
+	}
+	if(tone_num<0 or tone_num>=TONES){
+		fprintf(stderr,"ERROR: illegal tone number %u\n", tone_num);
+		return(-1);
+	}
+	
+	int tone;
+	tone=tone_num & 0x3F;
+
+	printf("Storing to tone #%u\n", tone_num);
+
+	// Update current patch and gui to reflect new tone number
+	patch_parameters[0]=tone_num;
+	current_patch_changed=true;
+	current_changed=true;
+	if(txt_tone_num){
+		char s[4];
+		sprintf(s, "%u", tone_num);
+		txt_tone_num->value(s);
+		txt_tone_num->redraw();
+	}
+	tone_bank->changed=true;
+	
+	memcpy(tone_bank->parameters[tone], tone_parameters, TONE_PARMS);
+	memcpy(tone_bank->names[tone], tone_name, TONE_NAME_SIZE+1);
+	
+	return(0);
+}
+
 ///////////////////////////
 // MIDI receive callback //
 ///////////////////////////
@@ -1763,8 +1857,13 @@ static void *alsa_midi_process(void *handle) {
 							set_tones_from_chunk(bulk_buffer, is_tone_bank_b? &tone_bank_b:&tone_bank_a);
 							if(bulk_buffer[8]==60){ // hack - if last chunk, tone number is 60
 								printf("Tone bank %c complete\n", is_tone_bank_b?'B':'A');
-								if (is_tone_bank_b){ tone_bank_b.valid=true; tone_bank_b.changed=true;}
-								else{ tone_bank_a.valid=true; tone_bank_a.changed=true;}
+								if (is_tone_bank_b){
+									set_tone_bank_valid(true, tone_bank_b, tone_table_b);
+									tone_bank_b.changed=true;
+								}else{
+									set_tone_bank_valid(true, tone_bank_a, tone_table_a);
+									tone_bank_a.changed=true;
+								}
 								is_tone_bank_b=!is_tone_bank_b;
 							}
 							break;
@@ -1773,8 +1872,13 @@ static void *alsa_midi_process(void *handle) {
 							set_patches_from_chunk(bulk_buffer, is_patch_bank_b? &patch_bank_b:&patch_bank_a);
 							if(bulk_buffer[8]==60){ // hack - if last chunk, patch number is 60
 								printf("Patch bank %c complete\n", is_patch_bank_b?'B':'A');
-								if (is_patch_bank_b){ patch_bank_b.valid=true; patch_bank_b.changed=true;}
-								else{ patch_bank_a.valid=true; patch_bank_a.changed=true;}
+								if (is_patch_bank_b){
+									set_patch_bank_valid(true, patch_bank_b, patch_table_b);
+									patch_bank_b.changed=true;
+								}else{
+									set_patch_bank_valid(true, patch_bank_a, patch_table_a);
+									patch_bank_a.changed=true;
+								}
 								is_patch_bank_b=!is_patch_bank_b;
 							}
 							break;
@@ -1866,7 +1970,7 @@ static void *alsa_midi_process(void *handle) {
 						}else if(level==CHORD_LEVEL){
 							printf("Received chord memory dump\n");
 							set_chord_memory_from_bld(ptr, chord_memory);
-							chord_memory_valid=true;
+							set_chord_memory_valid(true);
 							chord_table_1->redraw();
 							chord_table_2->redraw();
 						}else{
@@ -1924,6 +2028,31 @@ const char tone_send_prompt[]=
 const char tone_load_prompt[]=
 	"Tone bank not set\n"
 	"Please load a tone bank sysex file or send a tone bulk dump from the MKS-50";
+const char chord_load_prompt[]=
+	"Chords have not been set!\n"
+	"Please load a chords sysex file or send a chords bulk dump from the MKS-50";
+const char tone_recall_msg[]=
+	"Click on any tone to recall it to the edit buffer and send it to the MKS-50";
+const char patch_recall_msg[]=
+	"Click on any patch to recall it to the edit buffer and send it to the MKS-50";
+const char chord_recall_msg[]=
+	"Click on any chord to recall it to the edit buffer and send it to the MKS-50";
+
+void set_chord_memory_valid(bool b){
+	chord_memory_valid=b;
+	chord_table_1->tooltip(b?chord_recall_msg:chord_load_prompt);
+	chord_table_2->tooltip(b?chord_recall_msg:chord_load_prompt);
+}
+
+void set_tone_bank_valid(bool b, Tone_bank &tone_bank, Fl_Widget* tone_table){
+	tone_bank.valid=b;
+	tone_table->tooltip(b?tone_recall_msg:tone_load_prompt);
+}
+
+void set_patch_bank_valid(bool b, Patch_bank &patch_bank, Fl_Widget* patch_table){
+	patch_bank.valid=b;
+	patch_table->tooltip(b?patch_recall_msg:patch_load_prompt);
+}
 
 static void btn_testnote_callback(Fl_Widget* o, void*) {
 #ifdef _DEBUG	
@@ -2091,6 +2220,7 @@ static void parm_keymode_callback(Fl_Widget* o, void*) {
 		}
 		set_parm((t_byte)o->argument(), key_mode_map[parm_val]); // Send the correct sysex
 		patch_parameters[12]=parm_val; // Fix the current value
+		redraw_keymode_parameter();
 #ifdef _DEBUG	
 		printf("Key mode %u -> sysex 0x%02x\n", parm_val, key_mode_map[parm_val]);
 #endif
@@ -2107,6 +2237,59 @@ static void parm_chord_callback(Fl_Widget* o, void*) {
 		set_parm((t_byte)o->argument(), chord);
 		recall_chord(chord);
 	}
+}
+
+static void parm_wave_callback(Fl_Widget* o, void*) {
+	if (o){
+		t_byte v=(t_byte)((Fl_Valuator*)o)->value();
+		set_parm((t_byte)o->argument(), v);
+		redraw_wave_parameter();
+	}
+}
+
+static void parm_chorus_callback(Fl_Widget* o, void*) {
+	if (o){
+		t_byte v=(t_byte)((Fl_Valuator*)o)->value();
+		set_parm((t_byte)o->argument(), v);
+		redraw_chorus_parameter();
+	}
+}
+
+static void parm_porta_switch_callback(Fl_Widget* o, void*) {
+	if (o){
+		t_byte v=(t_byte)((Fl_Valuator*)o)->value();
+		set_parm((t_byte)o->argument(), v);
+		redraw_porta_switch_parameter();
+	}
+}
+
+static void parm_note_callback(Fl_Widget* o, void*) {
+	const char *ptr=((Fl_Input *)o)->value();
+	const char *ptr2;
+	int n;
+	n=strtonote(ptr, &ptr2);
+	if(n<0 or n>127)
+		show_err("Note must be between 0 and 127"); // show as notes
+	// test actual range based on argument - This is a hack
+	else if(o->argument()==128+1 && (n<12 || n>108)) // C0..C8
+		show_err("Range low note must be between C0 and C8");
+	else if(o->argument()==128+2 && (n<13 || n>109)) // C#0..C#8
+		show_err("Range low note must be between C#0 and C#8");
+	else
+		set_parm((t_byte)o->argument(), (t_byte)n);
+	if(patch_parameters[1]>patch_parameters[2]) // Hack, belongs elsewhere ??
+		show_err("Range low note should not be above range high note");
+}
+
+static void parm_key_shift_callback(Fl_Widget* o, void*) {
+	const char *ptr=((Fl_Input *)o)->value();
+	char *ptr2;
+	int n;
+	n=strtoul(ptr, &ptr2, 10);
+	if(n<-12 or n>12)
+		show_err("Must be between -12 and 12");
+	else
+		set_parm((t_byte)o->argument(), (t_byte)n & 0x7F);
 }
 
 static void txt_chord_callback(Fl_Widget* o, void*) {
@@ -2149,7 +2332,7 @@ static void txt_chord_callback(Fl_Widget* o, void*) {
 	}
 	// hex_dump(chord_notes, CHORD_NOTES);
 	current_chord_valid = (errs==0);
-	// Should undo chnges to chord_notes if not valid ??
+	// Should undo changes to chord_notes if not valid ??
 	current_chord_changed = true;
 	if(current_chord_valid) send_current_chord();
 }
@@ -2363,8 +2546,13 @@ int load_sysex_file(const char *filename){
 									set_tones_from_chunk(buf, is_tone_bank_b? &tone_bank_b:&tone_bank_a);
 									if(program==60){ // hack - if last chunk, tone number is 60
 										printf("Tone bank %c complete\n", is_tone_bank_b?'B':'A');
-										if (is_tone_bank_b){ tone_bank_b.valid=true; tone_bank_b.changed=false;}
-										else{ tone_bank_a.valid=true; tone_bank_a.changed=false;}
+										if (is_tone_bank_b){
+											set_tone_bank_valid(true, tone_bank_b, tone_table_b);
+											tone_bank_b.changed=false;
+										}else{
+											set_tone_bank_valid(true, tone_bank_a, tone_table_a);
+											tone_bank_a.changed=false;
+										}
 										is_tone_bank_b=!is_tone_bank_b;
 									}
 								}else{
@@ -2380,8 +2568,13 @@ int load_sysex_file(const char *filename){
 									set_patches_from_chunk(buf, is_patch_bank_b? &patch_bank_b:&patch_bank_a);
 									if(program==60){ // hack - if last chunk, patch number is 60
 										printf("Patch bank %c complete\n", is_patch_bank_b?'B':'A');
-										if (is_patch_bank_b){ patch_bank_b.valid=true; patch_bank_b.changed=false;}
-										else{ patch_bank_a.valid=true; patch_bank_a.changed=false;}
+										if (is_patch_bank_b){
+											set_patch_bank_valid(true, patch_bank_b, patch_table_b);
+											patch_bank_b.changed=false;
+										}else{
+											set_patch_bank_valid(true, patch_bank_a, patch_table_a);
+											patch_bank_a.changed=false;
+										}
 										is_patch_bank_b=!is_patch_bank_b;
 									}
 								}else{
@@ -2394,7 +2587,7 @@ int load_sysex_file(const char *filename){
 								if(len == CHORD_BLD_SIZE-SYSEX_HEADER_SIZE && buf[CHORD_BLD_SIZE-1] == 0xF7){
 									printf("Read chords bulk dump, length %u\n", len+SYSEX_HEADER_SIZE);
 									set_chord_memory_from_bld(buf, chord_memory);
-									chord_memory_valid=true;
+									set_chord_memory_valid(true);
 									chord_memory_changed=false;
 								}else{
 									fprintf(stderr,"ERROR: invalid chord  bulk dump\n");
@@ -2589,10 +2782,6 @@ void set_bld_from_chord_memory(t_byte *buf){
 	buf[CHORD_BLD_SIZE-1]=0xF7;
 }
 
-const char chord_load_prompt[]=
-	"Chords have not been set!\n"
-	"Please load a chords sysex file or send a chords bulk dump from the MKS-50";
-	
 void fc_save_chords_callback(Fl_File_Chooser *w, void *userdata){
 	// This is called on any user action, not just ok depressed!
 	if(w->visible()) return; // Do nothing until user has pressed ok
@@ -2859,6 +3048,7 @@ Fl_Double_Window* make_window() {
     int hh=800;
     int tw=ww-2*spacing;
     int th=ww-2*spacing-h;
+    Fl_Widget* o;
 
 	main_window = new Fl_Double_Window(ww, hh, "Yet another MKS-50 patch editor");
 	Fl_Tabs* tabs = new Fl_Tabs(0, 0, tw, th, "Parameters");
@@ -2886,12 +3076,12 @@ Fl_Double_Window* make_window() {
 	make_value_slider(x, y, w, 8*h, "DCO\nlfo", 11, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "DCO\nenv", 12, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "DCO\nafter", 13, 127); x += w + spacing;
-	// make_value_slider(x, y, w, 4*h, "DCO\nenv\nmode", 0, 3); x += w + spacing;
 	make_image_list_slider(x, y, w, 4*h, "DCO\nenv\nmode", 0, 3, env_images_rgb); x += w + spacing;
 	x+=w+spacing;
 	make_list_slider(x, y, w, 4*h, "Key\nmode", 128 + 12, 2, key_mode_names); x += w + spacing; // Patch parameter
 	patch_controls[12]->callback((Fl_Callback*)parm_keymode_callback); // Requires special mapping
 	make_value_slider(x, y, w, 4*h, "Chord\nmemory", 128 + 11, 15); x += w + spacing; // Patch parameter
+	make_value_slider(x, y, w, 8*h, "Mod.\nsens.", 128 + 5, 127); x += w + spacing; // Patch parameter
 	patch_controls[11]->callback((Fl_Callback*)parm_chord_callback); // Requires special actions
 	x += w+spacing; // room for label
 	txt_patch_name = new Fl_Input(x, y, 2*w + spacing, h, "Patch:");
@@ -2903,24 +3093,41 @@ Fl_Double_Window* make_window() {
 	txt_tone_name->callback((Fl_Callback*)txt_tone_name_callback);
 	txt_tone_name->tooltip("Up to 10 letters or digits or space or dash");
 	x += 2*w + spacing;
-	txt_tone_num = new Fl_Output(x, y, w, h);
+	txt_tone_num = new Fl_Output(x, y, w, h); // ?? make it an input, same as tone recall??
 	y+=h+spacing; x=x0;
 	txt_chord=new Fl_Input(x, y, 4*w+3*spacing, h, "Chord:");
 	txt_chord->callback((Fl_Callback*)txt_chord_callback);
 	txt_chord->tooltip("Up to 6 notes from C2 to C6");
-	y+=h+spacing;
+	y+=h+spacing; x=x0;
+	txt_key_low=new Fl_Input(x, y, w, h, "Range:");
+	txt_key_low->callback((Fl_Callback*)parm_note_callback);
+	txt_key_low->argument(128+1);
+	txt_key_low->tooltip("Lowest note the MKS-50 will play");
+	x+=w+spacing;
+	txt_key_high=new Fl_Input(x, y, w, h);
+	txt_key_high->callback((Fl_Callback*)parm_note_callback);
+	txt_key_high->argument(128+2);
+	txt_key_high->tooltip("Highest note the MKS-50 will play");
+	x+=w+spacing;
+	x+=w+spacing; // Room for label
+	txt_key_shift=new Fl_Int_Input(x, y, w, h, "Shift:");
+	txt_key_shift->callback((Fl_Callback*)parm_key_shift_callback);
+	txt_key_shift->argument(128+6);
+	txt_key_shift->tooltip("Transpose by -12..+12 semitones");
 	y=y0;
 		
 	x=spacing; y += 9*h + 2*spacing; // New row
-	make_image_list_slider(x, y, w, 4*h, "DCO\npulse", 3, 3, pulse_images_rgb); x += w + spacing;
-	make_image_list_slider(x, y, w, 5*h, "DCO\nsaw", 4, 5, saw_images_rgb); x += w + spacing;
+	o=make_image_list_slider(x, y, w, 4*h, "DCO\npulse", 3, 3, pulse_images_rgb); x += w + spacing;
+	o->callback((Fl_Callback*)parm_wave_callback);
+	o=make_image_list_slider(x, y, w, 5*h, "DCO\nsaw", 4, 5, saw_images_rgb); x += w + spacing;
+	o->callback((Fl_Callback*)parm_wave_callback);
 	make_image_list_slider(x, y, w, 5*h, "DCO\nsub", 5, 5, sub_images_rgb); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "Sub\nlevel", 7, 3); x += w + spacing;
 	make_value_slider(x, y, w, 5*h, "Noise\nlevel", 8, 3); x += w + spacing;
-	Fl_Value_Slider *o = make_value_slider(x, y, w, 8*h, "Pulse\nwidth", 14, 127); x += w + spacing;
-	o->tooltip("Applies only to some waveforms");
-	o=make_value_slider(x, y, w, 8*h, "P.mod\nrate", 15, 127); x += w + spacing;
-	o->tooltip("0 for fixed pulse width");
+	vs_pulse_width = make_value_slider(x, y, w, 8*h, "Pulse\nwidth", 14, 127); x += w + spacing;
+	vs_pulse_width->tooltip("Applies only to some waveforms");
+	vs_pulse_mod_rate=make_value_slider(x, y, w, 8*h, "P.mod\nrate", 15, 127); x += w + spacing;
+	vs_pulse_mod_rate->tooltip("Pulse width modulation rate\n0 for fixed pulse width");
 	make_value_slider(x, y, w, 5*h, "HPF\nfreq", 9, 3); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nfreq", 16, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nreso", 17, 127); x += w + spacing;
@@ -2929,8 +3136,9 @@ Fl_Double_Window* make_window() {
 	make_image_list_slider(x, y, w, 4*h, "VCF\nenv\nmode", 1, 3, env_images_rgb); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nkey\nfollow", 20, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCF\nafter", 21, 127); x += w + spacing;
-	make_list_slider(x, y, w, 3*h, "Chorus", 10, 1, on_off_names); x += w + spacing;
-	make_value_slider(x, y, w, 8*h, "Chorus\nrate", 34, 127); x += w + spacing;
+	o=make_list_slider(x, y, w, 3*h, "Chorus", 10, 1, on_off_names); x += w + spacing;
+	o->callback((Fl_Callback*)parm_chorus_callback);
+	vs_chorus_rate=make_value_slider(x, y, w, 8*h, "Chorus\nrate", 34, 127); x += w + spacing;
 
 	x=spacing; y += 9*h + 2*spacing; // New row
 	make_value_slider(x, y, w, 8*h, "VCA\nlevel", 22, 127); x += w + spacing;
@@ -2948,8 +3156,9 @@ Fl_Double_Window* make_window() {
 	x+=w+spacing;
 	make_value_slider(x, y, w, 8*h, "Bender\nrange", 35, 12); x += w + spacing;
 	x+=w+spacing;
-	make_list_slider(x, y, w, 3*h, "Porta.", 128 + 4, 1, on_off_names); x += w + spacing; // Patch parameter
-	make_value_slider(x, y, w, 8*h, "Porta.\ntime", 128 + 3, 127); x += w + spacing; // Patch parameter
+	o=make_list_slider(x, y, w, 3*h, "Porta.", 128 + 4, 1, on_off_names); x += w + spacing; // Patch parameter
+	o->callback((Fl_Callback*)parm_porta_switch_callback);
+	vs_porta_time=make_value_slider(x, y, w, 8*h, "Porta.\ntime", 128 + 3, 127); x += w + spacing; // Patch parameter
 	x+=w+spacing;
 	controls_group->end();
 
@@ -2960,7 +3169,7 @@ Fl_Double_Window* make_window() {
 	patch_table_a->col_width_all(2*w);
 	patch_table_a->row_height_all(h);
 	patch_table_a->patches(&patch_bank_a);
-	patch_table_a->tooltip("Click on any patch to recall it to the edit buffer and send it to the MKS-50");
+	patch_table_a->tooltip(patch_load_prompt);
 	// patch_table_a->align(FL_ALIGN_LEFT | FL_ALIGN_TOP);
 	// Buttons do not work for some y positions, interfering with label??
 	y+=h*8+2;
@@ -2969,7 +3178,7 @@ Fl_Double_Window* make_window() {
 	patch_table_b->col_width_all(2*w);
 	patch_table_b->row_height_all(h);
 	patch_table_b->patches(&patch_bank_b);
-	patch_table_b->tooltip("Click on any patch to recall it to the edit buffer and send it to the MKS-50");
+	patch_table_b->tooltip(patch_load_prompt);
 	y+=h*8+2+spacing;
 	btn_store_patch = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_patch->callback((Fl_Callback*)btn_store_patch_callback);
@@ -3003,14 +3212,14 @@ Fl_Double_Window* make_window() {
 	tone_table_a->col_width_all(2*w);
 	tone_table_a->row_height_all(h);
 	tone_table_a->tones(&tone_bank_a);
-	tone_table_a->tooltip("Click on any tone to recall it to the edit buffer and send it to the MKS-50");
+	tone_table_a->tooltip(tone_load_prompt);
 	y+=h*8+2;
 	y+=h+spacing; // Room for label
 	tone_table_b=new ToneTable(x, y, 2*w*8+2, h*8+2, "Tone bank B");
 	tone_table_b->col_width_all(2*w);
 	tone_table_b->row_height_all(h);
 	tone_table_b->tones(&tone_bank_b);
-	tone_table_b->tooltip("Click on any tone to recall it to the edit buffer and send it to the MKS-50");
+	tone_table_b->tooltip(tone_load_prompt);
 	y+=h*8+2+spacing;
 	btn_store_tone = new Fl_Toggle_Button(x, y, 2*w+spacing-5, h, "Store");
 	btn_store_tone->callback((Fl_Callback*)btn_store_tone_callback);
@@ -3045,14 +3254,14 @@ Fl_Double_Window* make_window() {
 	chord_table_1->col_width(0, 4*w);
 	chord_table_1->row_height_all(h);
 	chord_table_1->offset(0);
-	chord_table_1->tooltip("Click on any chord to recall it to the edit buffer and send it to the MKS-50");
+	chord_table_1->tooltip(chord_load_prompt);
 	x+=w*5+2+spacing;
 	chord_table_2=new ChordTable(x, y, w*5+2, h*8+2);
 	chord_table_2->row_header_width(w);
 	chord_table_2->col_width(0, 4*w);
 	chord_table_2->row_height_all(h);
 	chord_table_2->offset(8);
-	chord_table_2->tooltip("Click on any chord to recall it to the edit buffer and send it to the MKS-50");
+	chord_table_2->tooltip(chord_load_prompt);
 	y+=h*8+2+spacing; x=spacing; // New row
 	btn_store_chord = new Fl_Toggle_Button(x, y, 2*w+spacing, h, "Store");
 	btn_store_chord->tooltip("Will store chord from current edit buffer into next activated chord");
@@ -3123,6 +3332,7 @@ int main(int argc, char **argv) {
 	bool replicate=false;
 	// chord_table_2->offset(8);
 
+	// Handle command line arguments
 	int arg_errs=0;
 	long c;
 	if (argc > 1){
@@ -3166,19 +3376,19 @@ int main(int argc, char **argv) {
 		}
 	}
 	
-	printf("current chord %u\n", patch_parameters[11]);
+	// printf("current chord %u\n", patch_parameters[11]);
 	if(replicate){
 		if(!current_valid){
 			show_err("Nothing to replicate - please specify patch file");
 		}else{
 			for(int i=0; i<CHORDS; i++) store_chord(i, true);
-			chord_memory_valid=true;
+			set_chord_memory_valid(true);
 			for(int i=0; i<PATCHES; i++) store_patch(i, true);
-			patch_bank_a.valid=true;
-			patch_bank_b.valid=true;
+			set_patch_bank_valid(true, patch_bank_a, patch_table_a);
+			set_patch_bank_valid(true, patch_bank_b, patch_table_b);
 			for(int i=0; i<TONES; i++) store_tone(i, true);
-			tone_bank_a.valid=true;
-			tone_bank_b.valid=true;
+			set_tone_bank_valid(true, tone_bank_a, tone_table_a);
+			set_tone_bank_valid(true, tone_bank_b, tone_table_b);
 		}
 	}
 	

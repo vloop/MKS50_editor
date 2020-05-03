@@ -22,6 +22,7 @@
 #include <FL/fl_draw.H>
 #include <FL/Fl_Input.H>
 #include <FL/Fl_Image_Surface.H>
+#include <FL/Fl_Int_Input.H>
 
 
 #include "Fl_List_Slider.H"
@@ -33,5 +34,12 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <unistd.h>
+
+int store_chord(unsigned int chord_num, bool forced);
+int store_patch(unsigned int patch_num, bool forced);
+int store_tone(unsigned int tone_num, bool forced);
+int recall_chord(unsigned int chord_num);
+int recall_patch(unsigned int patch_num);
+int recall_tone(unsigned int tone_num);
 
 #endif
