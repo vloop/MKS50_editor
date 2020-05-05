@@ -41,6 +41,8 @@ Available options:
 -c midi channel
 -i alsa midi input id
 -o alsa midi output id
+-I alsa midi input name
+-O alsa midi output name
 ```
 If the -o option is used and a patch file is loaded from the command line,
 the editor will automatically send that patch over midi.
@@ -56,9 +58,13 @@ Depending on your configuration, these may change at reboot.
 Examples:
 ```
 MKS50_editor -o 20:2 -i 20:2 init.syx
+MKS50_editor -O "mio10 MIDI 3" -I "mio10 MIDI 3" init.syx
 MKS50_editor init.syx init_patches_A.syx init_patches_B.syx init_tones.syx init_tones.syx init_chords.syx
 
 ```
+Don't forget the quotes around the port name if it has spaces!
+
+Port names, unlike port ids, are not guaranteed to be unique; the first match will be used.
 
 On startup, the editor has no data, and has no way of requesting data from the MKS-50 (that's a limitation of the MKS-50 sysex implementation).
 
@@ -66,11 +72,15 @@ It can read preset files, but factory presets sysex files are not included with 
 
 Several init files are provided so you can start using the editor right away, however you'll probably want to create your own set of startup sysexe files.
 
-Getting data from the MKS-50 involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection, always the version with *, meaning no hadshake).
+The first step is to get data from the MKS-50, which involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection, always the version with *, meaning no hadshake).
 
-This only needs to be done once, the data can then be saved to files from the editor.
+The editor is always ready to receive MKS-50 sysex data, no manual operation is needed on the editor side.
 
-After you have created your set of sysex files, they can be loaded on startup (or manually while using the editor), thus bypassing the tedious manual operations on the MKS-50.
+Remember that the editor expects first the a data, then the b data.
+
+This only needs to be done once per bulk data set (patch bank a/b, tone bank a/b, chords). The data can then be saved to files from the editor.
+
+After you have created your set of sysex files, they can be loaded on startup by specifying them on the command line (or manually from inside the editor), thus bypassing the tedious manual operations on the MKS-50.
 
 However, if you do some manual editing from the MKS-50 front panel (which clearly indicates a masochistic tendency), it will obviously not be reflected automatically in the files.
 
@@ -78,7 +88,7 @@ To put things back in sync, you need to transmit bulk dumps either to or from th
 
 Of course, all of this can only work if you set the correct alsa midi connections from and to the editor.
 
-This can be done with aconnect (command line) or from qjackctl (gui) and others.
+This can be done with aconnect (command line) or from qjackctl (gui) and others, or by command line options.
 
 Sysex files:
 

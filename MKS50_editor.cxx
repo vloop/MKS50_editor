@@ -745,7 +745,7 @@ void set_chord_memory_from_bld(const t_byte *buf, t_byte chord_memory[16][6]){
 }
 
 int sprint_chord(char *s, const t_byte * chord){
-	// S must be able to hold at least 30 chars
+	// S must be able to hold at least 30 chars (6 notes, 5 chars max per note)
 	// This maps to C2..C6
 	char *s0=s;
 	int note;
@@ -949,7 +949,7 @@ void set_patch_parameters_from_apr(const t_byte *buf, t_byte *patch_parameters, 
 void redraw_chord_notes(){
 //	Fl::lock();
 	if(txt_chord){
-		static char s[5*CHORD_NOTES];
+		static char s[5*CHORD_NOTES]; // "C#-1 " -> 5 chars
 		sprint_chord(s, chord_notes);
 		txt_chord->value(s);
 		txt_chord->redraw();
@@ -1437,7 +1437,7 @@ snd_seq_t *open_seq() {
   return(seq_handle);
 }
 
-int aconnect(char *sender_name, char *dest_name)
+int aconnect(char *sender_id, char *dest_id)
 {
 	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
 	int queue = 0, convert_time = 0, convert_real = 0, exclusive = 0;
@@ -1470,14 +1470,14 @@ int aconnect(char *sender_name, char *dest_name)
 	}
 
 	/* set subscription */
-	if (snd_seq_parse_address(seq, &sender, sender_name) < 0) {
+	if (snd_seq_parse_address(seq, &sender, sender_id) < 0) {
 		snd_seq_close(seq);
-		fprintf(stderr, "invalid sender address %s\n", sender_name);
+		fprintf(stderr, "invalid sender address %s\n", sender_id);
 		return 1;
 	}
-	if (snd_seq_parse_address(seq, &dest, dest_name) < 0) {
+	if (snd_seq_parse_address(seq, &dest, dest_id) < 0) {
 		snd_seq_close(seq);
-		fprintf(stderr, "invalid destination address %s\n", dest_name);
+		fprintf(stderr, "invalid destination address %s\n", dest_id);
 		return 1;
 	}
 	snd_seq_port_subscribe_alloca(&subs);
@@ -1504,6 +1504,40 @@ int aconnect(char *sender_name, char *dest_name)
 	return 0;
 }
 
+static int get_port_by_name(snd_seq_t *seq, const char * port_name, char *port_id, int len) // , int perm)
+{
+	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
+	snd_seq_client_info_t *cinfo;
+	snd_seq_port_info_t *pinfo;
+	const char * current_port_name;
+	bool found=false;
+
+	snd_seq_client_info_alloca(&cinfo);
+	snd_seq_port_info_alloca(&pinfo);
+	snd_seq_client_info_set_client(cinfo, -1);
+	while (!found && snd_seq_query_next_client(seq, cinfo) >= 0) {
+		/* reset query info */
+		snd_seq_port_info_set_client(pinfo, snd_seq_client_info_get_client(cinfo));
+		snd_seq_port_info_set_port(pinfo, -1);
+		int client=snd_seq_client_info_get_client(cinfo);
+		while (!found && snd_seq_query_next_port(seq, pinfo) >= 0) {
+			/*
+			if (check_permission(pinfo, perm)) {
+				do_action(seq, cinfo, pinfo, count);
+				count++;
+			}
+			*/
+			current_port_name=snd_seq_port_info_get_name(pinfo);
+			if(!strcmp(port_name, snd_seq_port_info_get_name(pinfo))){
+				int port=snd_seq_port_info_get_port(pinfo);
+				printf("Found \"%s\" at \"%d:%d\"\n", port_name, client, port);
+				snprintf(port_id, len, "%d:%d", client, port);
+				found=true;
+			}
+		}
+	}
+	return(!found);
+}
 
 void all_notes_off(int channel){
 	snd_seq_event_t ev;
@@ -3327,6 +3361,7 @@ int main(int argc, char **argv) {
 	win->callback(window_callback);
 	patch_bank_b.program_offset=64;
 	tone_bank_b.program_offset=64;
+	char *sender_id=0, *dest_id=0;
 	char *sender_name=0, *dest_name=0;
 	bool dest_ok=false;
 	bool replicate=false;
@@ -3358,10 +3393,18 @@ int main(int argc, char **argv) {
 						i++;
 						break;
 					case 'i':
+						sender_id=argv[i+1];
+						i++;
+						break;
+					case 'I':
 						sender_name=argv[i+1];
 						i++;
 						break;
 					case 'o':
+						dest_id=argv[i+1];
+						i++;
+						break;
+					case 'O':
 						dest_name=argv[i+1];
 						i++;
 						break;
@@ -3400,20 +3443,39 @@ int main(int argc, char **argv) {
 	snd_seq_poll_descriptors(seq_handle, pfd, npfd, POLLIN);
 	
 	// midi connect
+	char dest_port_name[10];
+	char sender_port_name[10];
+	if (dest_name){
+		if(get_port_by_name(seq_handle, dest_name, dest_port_name, 10)){
+			dest_id=0;
+			show_err("ALSA midi port %s does not exist.", dest_name);
+		}else{
+			dest_id=dest_port_name;
+		}
+	}
+	if (sender_name){
+		if(get_port_by_name(seq_handle, sender_name, sender_port_name, 10)){
+			sender_id=0;
+			show_err("ALSA midi port %s does not exist.", sender_name);
+		}else{
+			sender_id=sender_port_name;
+		}
+	}
+	
 	int client = snd_seq_client_id(seq_handle);
 	char s_client[6];
 	snprintf(s_client, 6, "%u:0", client);
-	if(dest_name){
-		if(aconnect(s_client, dest_name))
+	if(dest_id){
+		if(aconnect(s_client, dest_id))
 			show_err("Connection to midi destination %s failed\n"
-			    "Use aconnect -o to show available destinations", dest_name);
+			    "Use aconnect -o to show available destinations", dest_id);
 		else
 			dest_ok=true;
 	}
-	if(sender_name){
-		if(aconnect(sender_name, s_client))
+	if(sender_id){
+		if(aconnect(sender_id, s_client))
 			show_err("Connection from midi source %s failed\n"
-			    "Use aconnect -i to show available sources", sender_name);
+			    "Use aconnect -i to show available sources", sender_id);
 	}
 
 	// create the thread and tell it to use Midi::work as thread function
