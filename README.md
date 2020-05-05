@@ -72,7 +72,7 @@ It can read preset files, but factory presets sysex files are not included with 
 
 Several init files are provided so you can start using the editor right away, however you'll probably want to create your own set of startup sysexe files.
 
-The first step is to get data from the MKS-50, which involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection, always the version with *, meaning no hadshake).
+The first step is to get data from the MKS-50, which involves manual operation on the MKS-50 front panel ("data transfer" button and patch/tone selection, always the version with "*", meaning no hadshake).
 
 The editor is always ready to receive MKS-50 sysex data, no manual operation is needed on the editor side.
 
