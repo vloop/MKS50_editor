@@ -13,16 +13,21 @@
  * buttons copy and paste for tables (single button changes from copy to paste?)
  * is 0 patch and tone acceptable as valid, in banks and in current? (chords are not)
  */
+ 
+/* Notes
+ * apr means all parameters, only for one sound
+ * bld means bulk dump, for an entire bank or chord memory
+ */
 
 #include "MKS50_editor.h"
 #include "MKS50_images.h"
 
 typedef unsigned char t_byte;
 
-#define _NAMESIZE 128
+// #define _NAMESIZE 128
 
 // MIDI related
-char midiName[_NAMESIZE] = "MKS-50 editor";
+// char midiName[_NAMESIZE] = "MKS-50 editor";
 snd_seq_t *seq_handle;
 int portid;
 int npfd;
@@ -123,7 +128,7 @@ Fl_Group *tones_group=(Fl_Group *)0;
 Fl_Group *chords_group=(Fl_Group *)0;
 
 Fl_Toggle_Button *btn_testnote=(Fl_Toggle_Button *)0;
-Fl_Button *btn_all_notes_off=(Fl_Button *)0;
+Fl_Button *btn_send_all_notes_off=(Fl_Button *)0;
 Fl_Button *btn_save_current=(Fl_Button *)0;
 Fl_Button *btn_load_current=(Fl_Button *)0;
 Fl_Button *btn_send_current=(Fl_Button *)0;
@@ -867,7 +872,7 @@ void redraw_note_parameter(Fl_Widget* o, t_byte note){
 void redraw_key_shift_parameter(){
 //	Fl::lock();
 	if(txt_key_shift){
-		static char s[5];
+		static char s[12]; // Normally between -12 and +12, extra length just in case
 		int v=patch_parameters[6];
 		if(v>0x3F) v-=0x80;
 		sprintf(s, "%i", v);
@@ -1027,6 +1032,7 @@ int rename_patch(unsigned int patch_num){
 		//	patch_bank->names[program][strlen(new_name)]=' ';
 		patch_bank->changed=true;
 	}
+	return(0);
 }
 
 
@@ -1162,6 +1168,7 @@ int rename_tone(unsigned int tone_num){
 		//	tone_bank->names[program][strlen(new_name)]=' ';
 		tone_bank->changed=true;
 	}
+	return(0);
 }
 
 void ToneTable::event_callback(Fl_Widget* t, void *data)
@@ -1420,7 +1427,7 @@ static bool bulk_pending=false; // true when a bulk dump spans several events
 static bool is_tone_bank_b=false;
 static bool is_patch_bank_b=false;
 
-snd_seq_t *open_seq() {
+snd_seq_t *open_seq(const char *midiName, int &portid) {
   snd_seq_t *seq_handle;
   if (snd_seq_open(&seq_handle, "hw", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
 	fprintf(stderr, "Error opening ALSA sequencer.\n");
@@ -1437,42 +1444,18 @@ snd_seq_t *open_seq() {
   return(seq_handle);
 }
 
-int aconnect(char *sender_id, char *dest_id)
+int alsa_connect(char *src_id, char *dest_id, snd_seq_t *seq)
 {
 	// Slightly adapted from ftp://ftp.alsa-project.org/pub/utils/
 	int queue = 0, convert_time = 0, convert_real = 0, exclusive = 0;
 
-	snd_seq_t *seq;
-	int list_perm = 0;
-	int client;
-	int list_subs = 0;
 	snd_seq_port_subscribe_t *subs;
-	snd_seq_addr_t sender, dest;
-
-	if (snd_seq_open(&seq, "default", SND_SEQ_OPEN_DUPLEX, 0) < 0) {
-		fprintf(stderr, "can't open sequencer\n");
-		return 1;
-	}
-	
-	/* connection or disconnection */
-
-	if ((client = snd_seq_client_id(seq)) < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "can't get client id\n");
-		return 1;
-	}
-
-	/* set client info */
-	if (snd_seq_set_client_name(seq, "ALSA Connector") < 0) {
-		snd_seq_close(seq);
-		fprintf(stderr, "can't set client info\n");
-		return 1;
-	}
+	snd_seq_addr_t src, dest;
 
 	/* set subscription */
-	if (snd_seq_parse_address(seq, &sender, sender_id) < 0) {
+	if (snd_seq_parse_address(seq, &src, src_id) < 0) {
 		snd_seq_close(seq);
-		fprintf(stderr, "invalid sender address %s\n", sender_id);
+		fprintf(stderr, "invalid src address %s\n", src_id);
 		return 1;
 	}
 	if (snd_seq_parse_address(seq, &dest, dest_id) < 0) {
@@ -1481,7 +1464,7 @@ int aconnect(char *sender_id, char *dest_id)
 		return 1;
 	}
 	snd_seq_port_subscribe_alloca(&subs);
-	snd_seq_port_subscribe_set_sender(subs, &sender);
+	snd_seq_port_subscribe_set_sender(subs, &src);
 	snd_seq_port_subscribe_set_dest(subs, &dest);
 	snd_seq_port_subscribe_set_queue(subs, queue);
 	snd_seq_port_subscribe_set_exclusive(subs, exclusive);
@@ -1489,17 +1472,13 @@ int aconnect(char *sender_id, char *dest_id)
 	snd_seq_port_subscribe_set_time_real(subs, convert_real);
 
 	if (snd_seq_get_port_subscription(seq, subs) == 0) {
-		snd_seq_close(seq);
 		fprintf(stderr, "Connection is already subscribed\n");
 		return 1;
 	}
 	if (snd_seq_subscribe_port(seq, subs) < 0) {
-		snd_seq_close(seq);
 		fprintf(stderr, "Connection failed (%s)\n", snd_strerror(errno));
 		return 1;
 	}
-
-	snd_seq_close(seq);
 
 	return 0;
 }
@@ -1539,7 +1518,7 @@ static int get_port_by_name(snd_seq_t *seq, const char * port_name, char *port_i
 	return(!found);
 }
 
-void all_notes_off(int channel){
+void send_all_notes_off(int channel){
 	snd_seq_event_t ev;
 	snd_seq_ev_clear(&ev);
 	snd_seq_ev_set_source(&ev, portid); 
@@ -1845,7 +1824,7 @@ int store_tone(unsigned int tone_num, bool forced){
 ///////////////////////////
 static void *alsa_midi_process(void *handle) {
 	// This function is way too long, should be split ??
-	struct sched_param param;
+//	struct sched_param param;
 	int policy;
 	snd_seq_t *seq_handle = (snd_seq_t *)handle;
 
@@ -2110,9 +2089,9 @@ static void btn_testnote_callback(Fl_Widget* o, void*) {
 	snd_seq_event_output_direct(seq_handle, &ev);
 }
 
-static void btn_all_notes_off_callback(Fl_Widget* o, void*) {
+static void btn_send_all_notes_off_callback(Fl_Widget* o, void*) {
 	btn_testnote->clear(); // Reset test note state
-	all_notes_off(midi_channel);
+	send_all_notes_off(midi_channel);
 }
 
 
@@ -2199,6 +2178,7 @@ static void btn_save_current_callback(Fl_Widget* o, void*) {
     fc->callback(fc_save_current_callback);
     fc->show();
 }
+
 static void set_parm(t_byte parm_num, t_byte parm_val){
 	// Set in memory and sends to MKS-50
 	// Parameter number coded on 7 bits
@@ -3075,7 +3055,7 @@ Fl_Double_Window* make_window() {
 	saw_images_rgb[5]=&saw5_image_rgb;
 
 	// Create controls
-	int w=50, h=25, spacing=5;
+	int w=50, h=25, spacing=5, vspacing=3;
 	int x=spacing, y=spacing;
 	int x0, y0;
     int ww=3*spacing+17*(w+spacing);
@@ -3085,7 +3065,7 @@ Fl_Double_Window* make_window() {
     Fl_Widget* o;
 
 	main_window = new Fl_Double_Window(ww, hh, "Yet another MKS-50 patch editor");
-	Fl_Tabs* tabs = new Fl_Tabs(0, 0, tw, th, "Parameters");
+	Fl_Tabs* tabs = new Fl_Tabs(spacing, 0, tw, th, "Parameters");
 	controls_group = new Fl_Group(spacing, spacing+h, tw, th, "Parameters");
 	x=11*w+12*spacing;
 	x0=x; y0=y;
@@ -3093,16 +3073,16 @@ Fl_Double_Window* make_window() {
 	x += w+spacing; // There will be labels below
 	btn_save_current = new Fl_Button(x, y, 2*w+spacing, h, "Save");
 	btn_save_current->callback((Fl_Callback*)btn_save_current_callback);
-	 btn_save_current->tooltip("Save all parameters from current edit buffer to file");
+	btn_save_current->tooltip("Save all parameters from current edit buffer to file");
 	x += 2*w + 2*spacing;
 	btn_send_current = new Fl_Button(x, y, 2*w+spacing, h, "Send");
 	btn_send_current->tooltip("Send all parameters from current edit buffer over midi");
 	btn_send_current->callback((Fl_Callback*)btn_send_current_callback);
-	x += 2*w + 2*spacing;
+	// x += 2*w + 2*spacing;
 	x=x0; y+=h+spacing;
 	y=y0; x=x0;
 	// All sliders are for tone parameters unless otherwise noted
-	x=spacing; y += 3*h + spacing; // New row
+	x=2*spacing; y += 3*h + spacing + vspacing; // New row
 	make_value_slider(x, y, w, 8*h, "LFO\nrate", 24, 127); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "LFO\ndelay", 25, 127); x += w + spacing;
 	x+=w+spacing;
@@ -3150,7 +3130,7 @@ Fl_Double_Window* make_window() {
 	txt_key_shift->tooltip("Transpose by -12..+12 semitones");
 	y=y0;
 		
-	x=spacing; y += 9*h + 2*spacing; // New row
+	x=2*spacing; y += 9*h + 2*spacing + vspacing; // New row
 	o=make_image_list_slider(x, y, w, 4*h, "DCO\npulse", 3, 3, pulse_images_rgb); x += w + spacing;
 	o->callback((Fl_Callback*)parm_wave_callback);
 	o=make_image_list_slider(x, y, w, 5*h, "DCO\nsaw", 4, 5, saw_images_rgb); x += w + spacing;
@@ -3174,7 +3154,7 @@ Fl_Double_Window* make_window() {
 	o->callback((Fl_Callback*)parm_chorus_callback);
 	vs_chorus_rate=make_value_slider(x, y, w, 8*h, "Chorus\nrate", 34, 127); x += w + spacing;
 
-	x=spacing; y += 9*h + 2*spacing; // New row
+	x=2*spacing; y += 9*h + 2*spacing + vspacing; // New row
 	make_value_slider(x, y, w, 8*h, "VCA\nlevel", 22, 127); x += w + spacing;
 	make_image_list_slider(x, y, w, 4*h, "VCA\nenv\nmode", 2, 3, env_vca_images_rgb); x += w + spacing;
 	make_value_slider(x, y, w, 8*h, "VCA\nafter", 23, 127); x += w + spacing;
@@ -3197,7 +3177,7 @@ Fl_Double_Window* make_window() {
 	controls_group->end();
 
 	patches_group = new Fl_Group(spacing, spacing+2*h, tw, th, "Patches");
-	x=spacing; y=h+spacing; // Room for tabs
+	x=2*spacing; y=h+spacing; // Room for tabs
 	y+=h+spacing; // Room for label
 	patch_table_a=new PatchTable(x, y, 2*w*8+2, h*8+2, "Patch bank A");
 	patch_table_a->col_width_all(2*w);
@@ -3240,7 +3220,7 @@ Fl_Double_Window* make_window() {
 	patches_group->end();
 
 	tones_group = new Fl_Group(spacing, spacing+h, tw, th, "Tones");
-	x=spacing; y=h+spacing; // Room for tabs
+	x=2*spacing; y=h+spacing; // Room for tabs
 	y+=h+spacing; // Room for label
 	tone_table_a=new ToneTable(x, y, 2*w*8+2, h*8+2, "Tone bank A");
 	tone_table_a->col_width_all(2*w);
@@ -3281,7 +3261,7 @@ Fl_Double_Window* make_window() {
 	tones_group->end();
 
 	chords_group = new Fl_Group(spacing, spacing+h, tw, th, "Chords");
-	x=spacing; y=h+spacing; // Room for tabs
+	x=2*spacing; y=h+spacing; // Room for tabs
 	y+=h+spacing; // Room for label
 	chord_table_1=new ChordTable(x, y, w*5+2, h*8+2, "Chords");
 	chord_table_1->row_header_width(w);
@@ -3315,7 +3295,7 @@ Fl_Double_Window* make_window() {
 	tabs->end();
 	
 	// The following will appear on all tabs
-	x=spacing; y=hh-h-spacing;
+	x=2*spacing; y=hh-h-spacing;
 	btn_testnote = new Fl_Toggle_Button(x, y, 2*w+spacing, h, "Test note");
 	btn_testnote->callback((Fl_Callback*)btn_testnote_callback);
 	btn_testnote->tooltip("Send a test note over midi");
@@ -3341,9 +3321,9 @@ Fl_Double_Window* make_window() {
 	snprintf(str_test_vel, 4, "%u", midi_test_velocity);
 	txt_test_vel->value(str_test_vel);
 	x += w + spacing;
-	btn_all_notes_off = new Fl_Button(x, y, 2*w+spacing, h, "Panic");
-	btn_all_notes_off->callback((Fl_Callback*)btn_all_notes_off_callback);
-	btn_all_notes_off->tooltip("Send an \"all notes off\" message");
+	btn_send_all_notes_off = new Fl_Button(x, y, 2*w+spacing, h, "Panic");
+	btn_send_all_notes_off->callback((Fl_Callback*)btn_send_all_notes_off_callback);
+	btn_send_all_notes_off->tooltip("Send an \"all notes off\" message");
 	x += 2*w + 2*spacing;
 	btn_load_current = new Fl_Button(x, y, 2*w+spacing, h, "Load");
 	btn_load_current->callback((Fl_Callback*)btn_load_current_callback);
@@ -3359,20 +3339,23 @@ int main(int argc, char **argv) {
 
 	Fl_Window* win = make_window();
 	win->callback(window_callback);
+	
 	patch_bank_b.program_offset=64;
 	tone_bank_b.program_offset=64;
-	char *sender_id=0, *dest_id=0;
-	char *sender_name=0, *dest_name=0;
+	
+	char *src_id=0, *dest_id=0;
+	char *src_name=0, *dest_name=0;
 	bool dest_ok=false;
 	bool replicate=false;
 	// chord_table_2->offset(8);
 
 	// Handle command line arguments
+	// should do something about repeated options??
 	int arg_errs=0;
 	long c;
 	if (argc > 1){
 		for(int i=1; i<argc;i++){
-			if(argv[i][0]!='-' || strlen(argv[i])!=2){
+			if(argv[i][0]!='-' || strlen(argv[i])!=2){ // All options are single-letter
 				// Got a file
 				arg_errs+=load_sysex_file(argv[i]);
 			}else{
@@ -3393,11 +3376,11 @@ int main(int argc, char **argv) {
 						i++;
 						break;
 					case 'i':
-						sender_id=argv[i+1];
+						src_id=argv[i+1];
 						i++;
 						break;
 					case 'I':
-						sender_name=argv[i+1];
+						src_name=argv[i+1];
 						i++;
 						break;
 					case 'o':
@@ -3437,14 +3420,14 @@ int main(int argc, char **argv) {
 	
 	// midi init
 	pthread_t midithread;
-	seq_handle = open_seq();
+	seq_handle = open_seq("MKS-50 editor", portid);
 	npfd = snd_seq_poll_descriptors_count(seq_handle, POLLIN);
 	pfd = (struct pollfd *)alloca(npfd * sizeof(struct pollfd));
 	snd_seq_poll_descriptors(seq_handle, pfd, npfd, POLLIN);
 	
 	// midi connect
 	char dest_port_name[10];
-	char sender_port_name[10];
+	char src_port_name[10];
 	if (dest_name){
 		if(get_port_by_name(seq_handle, dest_name, dest_port_name, 10)){
 			dest_id=0;
@@ -3453,12 +3436,12 @@ int main(int argc, char **argv) {
 			dest_id=dest_port_name;
 		}
 	}
-	if (sender_name){
-		if(get_port_by_name(seq_handle, sender_name, sender_port_name, 10)){
-			sender_id=0;
-			show_err("ALSA midi port %s does not exist.", sender_name);
+	if (src_name){
+		if(get_port_by_name(seq_handle, src_name, src_port_name, 10)){
+			src_id=0;
+			show_err("ALSA midi port %s does not exist.", src_name);
 		}else{
-			sender_id=sender_port_name;
+			src_id=src_port_name;
 		}
 	}
 	
@@ -3466,22 +3449,22 @@ int main(int argc, char **argv) {
 	char s_client[6];
 	snprintf(s_client, 6, "%u:0", client);
 	if(dest_id){
-		if(aconnect(s_client, dest_id))
+		if(alsa_connect(s_client, dest_id, seq_handle))
 			show_err("Connection to midi destination %s failed\n"
 			    "Use aconnect -o to show available destinations", dest_id);
 		else
 			dest_ok=true;
 	}
-	if(sender_id){
-		if(aconnect(sender_id, s_client))
+	if(src_id){
+		if(alsa_connect(src_id, s_client, seq_handle))
 			show_err("Connection from midi source %s failed\n"
-			    "Use aconnect -i to show available sources", sender_id);
+			    "Use aconnect -i to show available sources", src_id);
 	}
 
 	// create the thread and tell it to use Midi::work as thread function
 	int err = pthread_create(&midithread, NULL, alsa_midi_process, seq_handle);
 	if (err) {
-		fprintf(stderr, "Error %u creating MIDI thread\n", err);
+		show_err("Error %u creating MIDI thread\n", err);
 		// should exit? This is non-blocking for one-way use from editor to MKS-50.
 	}
 
